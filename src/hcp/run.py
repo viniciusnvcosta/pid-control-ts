@@ -200,7 +200,7 @@ def run_experiment(cfg: RunConfig, bundle: HierarchyBundle) -> ExperimentResult:
     t0 = evaluation_start(bundle, cfg.mint_warmup)
     weeks = bundle.dates[t0:]
     y = bundle.y[0, t0:]
-    gap = bundle.y[0] - bundle.y[1:].sum(axis=0)
+    gap = bundle.y[0, t0:] - bundle.y[1:, t0:].sum(axis=0)
     diagnostics: dict = {
         "n_weeks": len(weeks),
         "evaluation_start": str(pd.Timestamp(weeks[0]).date()),

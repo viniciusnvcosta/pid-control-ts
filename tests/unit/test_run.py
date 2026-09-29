@@ -1,5 +1,6 @@
 # ABOUTME: Unit tests for run configuration validation and the in-memory experiment on synthetic data.
 # ABOUTME: Checks config errors, arm grid, raw/none parity with base quantiles, and the single primary contrast.
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -74,3 +75,14 @@ def test_run_experiment_arm_grid_and_parity(hier_bundle) -> None:
     assert result.diagnostics["n_weeks"] == n_weeks
     assert result.diagnostics["imputed_cells"] == 1
     assert set(result.diagnostics["crossings"]) == {"none", "bottom_up", "mint_shrink"}
+
+
+def test_truth_incoherence_is_scoped_to_the_evaluation_window(hier_bundle) -> None:
+    # week index 2 is before t0 = 8, so a leaf-sum gap there must not leak into
+    # a diagnostic that is supposed to describe the evaluation window only.
+    y = hier_bundle.y.copy()
+    y[0, 2] += 100.0
+    bundle = replace(hier_bundle, y=y)
+    cfg = RunConfig(**BASE, **SMALL)
+    result = run_experiment(cfg, bundle)
+    assert result.diagnostics["truth_incoherence"]["max_abs"] == 0.0
