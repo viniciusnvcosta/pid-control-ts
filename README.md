@@ -111,3 +111,10 @@ Alternatively, you can just execute the bash scripts.
 
 <h3 align="center" style="margin-bottom:0px; border-bottom:0px; padding-bottom:0px">Workarounds for Known Bugs</h3>
 On M1/M2 Mac, in order to use Prophet, follow the instructions at this link: <code>https://github.com/facebook/prophet/issues/2250</code>.
+
+## Fork: hierarchical reconciliation (state → US)
+
+This fork asks whether reconciling the COVIDhub ensemble's 4-week-ahead death quantiles across
+the US → 56-leaf hierarchy (bottom-up, MinT(Shrink)) before conformal P/PI/PID control improves
+the temporal coverage of the US series. See `docs/development.md` to run it and
+`docs/protocol-decisions.md` for the pre-registered protocol.
