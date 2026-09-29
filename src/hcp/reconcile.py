@@ -9,7 +9,6 @@ towards its diagonal with the Schafer & Strimmer (2005) lambda. Each quantile le
 reconciled with the same projection; levels that cross afterwards are re-sorted.
 """
 
-import warnings
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -156,10 +155,8 @@ def crossing_mask(q: np.ndarray, rtol: float = 1e-9) -> np.ndarray:
     """
     diffs = np.diff(q, axis=-1)
     defined = np.isfinite(q).all(axis=-1)
-    with warnings.catch_warnings():
-        # all-NaN cells (not yet defined) warn on nanmax; their scale is unused below.
-        warnings.filterwarnings("ignore", message="All-NaN slice encountered")
-        scale = np.maximum(1.0, np.nanmax(np.abs(q), axis=-1))
+    # Undefined (NaN) cells get scale 1; they are masked out by ``defined`` anyway.
+    scale = np.maximum(1.0, np.abs(np.where(np.isfinite(q), q, 0.0)).max(axis=-1))
     return (diffs < -rtol * scale[..., None]).any(axis=-1) & defined
 
 
