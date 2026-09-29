@@ -5,7 +5,7 @@ import pdb
 
 # Quantile function
 def standard_weighted_quantile(
-    scores, wtildes, quantile, maxscore=np.infty, allow_illegal_weights=False
+    scores, wtildes, quantile, maxscore=np.inf, allow_illegal_weights=False
 ):
     if not allow_illegal_weights:
         assert (np.array(wtildes).size == 0) or (wtildes.sum() <= 1.0 + 1e-4)

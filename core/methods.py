@@ -27,7 +27,7 @@ def trailing_window(
     for t in tqdm(range(T_test)):
         t_pred = t - ahead + 1
         if min(weight_length, t_pred) < np.ceil(1 / alpha):
-            qs[t] = np.infty
+            qs[t] = np.inf
         else:
             qs[t] = np.quantile(
                 scores[max(t_pred - weight_length, 0) : t_pred],
@@ -49,12 +49,12 @@ def aci_clipped(scores, alpha, lr, window_length, T_burnin, ahead, *args, **kwar
         clip_value = (
             scores[max(t_pred - window_length, 0) : t_pred].max()
             if t_pred > 0
-            else np.infty
+            else np.inf
         )
         if t_pred > T_burnin:
             # Setup: current gradient
             if alphat <= 1 / (t_pred + 1):
-                qs[t] = np.infty
+                qs[t] = np.inf
             else:
                 qs[t] = np.quantile(
                     scores[max(t_pred - window_length, 0) : t_pred],
@@ -71,8 +71,8 @@ def aci_clipped(scores, alpha, lr, window_length, T_burnin, ahead, *args, **kwar
             if t_pred > np.ceil(1 / alpha):
                 qs[t] = np.quantile(scores[:t_pred], 1 - alpha)
             else:
-                qs[t] = np.infty
-        if qs[t] == np.infty:
+                qs[t] = np.inf
+        if qs[t] == np.inf:
             qs[t] = clip_value
     results = {"method": "ACI (clipped)", "q": qs, "alpha": alphas}
     return results
@@ -89,7 +89,7 @@ def aci(scores, alpha, lr, window_length, T_burnin, ahead, *args, **kwargs):
         if t_pred > T_burnin:
             # Setup: current gradient
             if alphat <= 1 / (t_pred + 1):
-                qs[t] = np.infty
+                qs[t] = np.inf
             else:
                 qs[t] = np.quantile(
                     scores[max(t_pred - window_length, 0) : t_pred],
@@ -106,7 +106,7 @@ def aci(scores, alpha, lr, window_length, T_burnin, ahead, *args, **kwargs):
             if t_pred > np.ceil(1 / alpha):
                 qs[t] = np.quantile(scores[:t_pred], 1 - alpha)
             else:
-                qs[t] = np.infty
+                qs[t] = np.inf
     results = {"method": "ACI", "q": qs, "alpha": alphas}
     return results
 
@@ -127,9 +127,9 @@ def quantile(scores, alpha, lr, ahead, proportional_lr=True, *args, **kwargs):
 
 def mytan(x):
     if x >= np.pi / 2:
-        return np.infty
+        return np.inf
     elif x <= -np.pi / 2:
-        return -np.infty
+        return -np.inf
     else:
         return np.tan(x)
 
@@ -238,7 +238,7 @@ def quantile_integrator_log_scorecaster(
         # integrator = saturation_fn_log((1-covereds)[T_burnin:t_pred].sum() - (t_pred-T_burnin)*alpha, (t_pred-T_burnin), Csat, KI) if t_pred > T_burnin else 0
         integrator_arg = (1 - covereds)[:t_pred].sum() - (t_pred) * alpha
         # if onesided_integrator:
-        #    integrator_arg = np.clip(integrator_arg, 0, np.infty)
+        #    integrator_arg = np.clip(integrator_arg, 0, np.inf)
         integrator = saturation_fn_log(integrator_arg, t_pred, Csat, KI)
         # Train and scorecast if necessary
         if scorecast and train_model and t_pred > T_burnin and t + ahead < T_test:
