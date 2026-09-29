@@ -247,7 +247,7 @@ def quantile_integrator_log_scorecaster(
                 curr_scores.astype(float),
                 period=seasonal_period,
             ).fit()
-            scorecasts[t + ahead] = model.forecast(ahead)
+            scorecasts[t + ahead] = model.forecast(ahead).iloc[-1]
         # Update the next quantile
         if t < T_test - 1:
             qts[t + 1] = qts[t] - lr_t * grad
