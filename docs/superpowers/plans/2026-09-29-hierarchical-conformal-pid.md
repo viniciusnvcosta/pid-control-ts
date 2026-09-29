@@ -27,7 +27,7 @@
 - Lint only the new code: `uv run ruff check src tests/unit tests/integration tests/e2e tests/helpers.py tests/conftest.py`. The upstream `core/` and `tests/*.py` harness are not linted.
 - Test output must be clean. `uv run pytest` runs unit and e2e tests; `-m integration` needs `data/deaths.csv` (gitignored, SHA-256 `cb4dccfd21d6c08b1247aa9a7c6a8d93f7c373871526cfcb4860df884b54ac06`).
 - Use Conventional Commits. Never pass `--no-verify`. Never push.
-- The only change allowed in `core/` is `np.infty` → `np.inf` (Task 1).
+- The only changes allowed in `core/` are `np.infty` → `np.inf` (Task 1) and, by user decision D14, `scorecasts[t + ahead] = model.forecast(ahead).iloc[-1]` at `core/methods.py:250` (Task 4), each behind characterization tests.
 - Hierarchy: row 0 is `us`, then the leaves in alphabetical order (51 states/DC plus `as`, `gu`, `mp`, `pr`, `vi`). Quantile levels are `(0.1, 0.5, 0.9)` on the last axis.
 
 ## Cost routing for subagent-driven development
