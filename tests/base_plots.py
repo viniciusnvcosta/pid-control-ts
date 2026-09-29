@@ -13,33 +13,35 @@ from plotting_utils import *
 if __name__ == "__main__":
     # Open file
     results_filename = sys.argv[1]
-    with open(results_filename, 'rb') as handle:
+    with open(results_filename, "rb") as handle:
         all_results = pkl.load(handle)
-    dataset_name = results_filename.split('.')[-2].split('/')[-1]
+    dataset_name = results_filename.split(".")[-2].split("/")[-1]
     model_names = list(all_results.keys())
 
     # Remap names
     method_title_map = {
-        'Trail': 'Trail',
-        'ACI': 'ACI',
-        'ACI (clipped)': 'ACI (clipped)',
-        'Quantile': 'Conformal P',
-        'Quantile+Integrator (log)': 'Conformal PI',
-        'Quantile+Integrator (log)+Scorecaster': 'Conformal PID'
+        "Trail": "Trail",
+        "ACI": "ACI",
+        "ACI (clipped)": "ACI (clipped)",
+        "Quantile": "Conformal P",
+        "Quantile+Integrator (log)": "Conformal PI",
+        "Quantile+Integrator (log)+Scorecaster": "Conformal PID",
     }
 
     for model_name in model_names:
         results = all_results[model_name]
         # If results contains ACI (clipped), delete it
-        if 'ACI (clipped)' in results.keys():
-            del results['ACI (clipped)']
+        if "ACI (clipped)" in results.keys():
+            del results["ACI (clipped)"]
         plots_folder = "./plots/" + dataset_name + "/" + model_name + "/"
         os.makedirs(plots_folder, exist_ok=True)
 
         # Set style
         cmap_lines = sns.color_palette("husl", len(list(results.keys())))
-        sns.set_theme(context="notebook", palette=cmap_lines, style="white", font_scale=4)
-        sns.set_style({'axes.spines.right': False, 'axes.spines.top': False})
+        sns.set_theme(
+            context="notebook", palette=cmap_lines, style="white", font_scale=4
+        )
+        sns.set_style({"axes.spines.right": False, "axes.spines.top": False})
 
         # Process results
         alpha = results["alpha"]
@@ -84,162 +86,307 @@ if __name__ == "__main__":
             for lr in list(results[key].keys()):
                 if real_data:
                     results[key][lr]["covered"] = (
-                              (np.stack(results[key][lr]["sets"][T_burnin+1:])[:,0] <= data['y'][T_burnin+1:]) \
-                            & (np.stack(results[key][lr]["sets"][T_burnin+1:])[:,1] >= data['y'][T_burnin+1:]) \
-                        )
+                        np.stack(results[key][lr]["sets"][T_burnin + 1 :])[:, 0]
+                        <= data["y"][T_burnin + 1 :]
+                    ) & (
+                        np.stack(results[key][lr]["sets"][T_burnin + 1 :])[:, 1]
+                        >= data["y"][T_burnin + 1 :]
+                    )
                 else:
-                    results[key][lr]["covered"] = results[key][lr]["q"][T_burnin+1:] >= scores[T_burnin+1:]
-            coverages[key] = { lr : results[key][lr]["covered"].astype(int).mean() for lr in list(results[key].keys()) }
+                    results[key][lr]["covered"] = (
+                        results[key][lr]["q"][T_burnin + 1 :] >= scores[T_burnin + 1 :]
+                    )
+            coverages[key] = {
+                lr: results[key][lr]["covered"].astype(int).mean()
+                for lr in list(results[key].keys())
+            }
         print(coverages)
 
         # Plot coverage
         linewidth = 2
         transparency = 0.7
 
-        fig, axs = plt.subplots(nrows=nrows, ncols=ncols, sharex=True, sharey=True, figsize = (ncols*10.1, nrows*6.4))
+        fig, axs = plt.subplots(
+            nrows=nrows,
+            ncols=ncols,
+            sharex=True,
+            sharey=True,
+            figsize=(ncols * 10.1, nrows * 6.4),
+        )
         i = 0
-        xlabels_nonscores = range(T_burnin+1, scores.shape[0])
+        xlabels_nonscores = range(T_burnin + 1, scores.shape[0])
         for key in results.keys():
             color = cmap_lines[i]
             j = 0
             for lr in results[key].keys():
-                label = f"lr={lr}, cvg={100*coverages[key][lr]:.1f}%" if lr is not None else f"cvg={100*coverages[key][lr]:.1f}%"
-                axs[j,i].plot(xlabels_nonscores[T_burnin:], moving_average(results[key][lr]["covered"])[T_burnin:], label=label, linewidth=linewidth, color=color, alpha=transparency)
-                axs[j,i].axhline(1-alpha, color='#888888', linestyle='--', linewidth=linewidth)
+                label = (
+                    f"lr={lr}, cvg={100 * coverages[key][lr]:.1f}%"
+                    if lr is not None
+                    else f"cvg={100 * coverages[key][lr]:.1f}%"
+                )
+                axs[j, i].plot(
+                    xlabels_nonscores[T_burnin:],
+                    moving_average(results[key][lr]["covered"])[T_burnin:],
+                    label=label,
+                    linewidth=linewidth,
+                    color=color,
+                    alpha=transparency,
+                )
+                axs[j, i].axhline(
+                    1 - alpha, color="#888888", linestyle="--", linewidth=linewidth
+                )
                 if label is not None:
-                    axs[j,i].legend(handlelength=0.0,handletextpad=-0.1)
+                    axs[j, i].legend(handlelength=0.0, handletextpad=-0.1)
                 j = j + 1
             # Title the top row
-            axs[0,i].set_title(method_title_map[key])
+            axs[0, i].set_title(method_title_map[key])
             i = i + 1
-        fig.supxlabel('Time')
-        fig.supylabel('Coverage')
+        fig.supxlabel("Time")
+        fig.supylabel("Coverage")
         plt.tight_layout(pad=0.05)
         plt.subplots_adjust(left=0.07, bottom=0.07, right=0.95, wspace=0.2)
         plt.savefig(plots_folder + "coverage.pdf")
 
         # Size plots (zoomed in)! Only visualize the 'upper' score, i.e., the last one in the array.
-        fig, axs = plt.subplots(nrows=nrows, ncols=ncols+1, sharex=True, sharey=True, figsize = ((ncols + 1)*10.1, nrows*6.4))
+        fig, axs = plt.subplots(
+            nrows=nrows,
+            ncols=ncols + 1,
+            sharex=True,
+            sharey=True,
+            figsize=((ncols + 1) * 10.1, nrows * 6.4),
+        )
         # Plot setup
         last = 50
         i = 1
-        upper_scores = np.stack(scores)[-last:,-1] if len(np.stack(scores).shape) > 1 else scores[-last:]
+        upper_scores = (
+            np.stack(scores)[-last:, -1]
+            if len(np.stack(scores).shape) > 1
+            else scores[-last:]
+        )
         low_clip = np.nanmin(upper_scores) * 0.9
         high_clip = np.nanmax(upper_scores) * 1.1
         # Loop through methods
         for key in results.keys():
-            color = cmap_lines[i-1]
+            color = cmap_lines[i - 1]
             j = 0
             for lr in results[key].keys():
                 # Get the quantiles
-                upper_quantiles = np.stack(results[key][lr]["q"])[-last:,-1] if len(np.stack(scores).shape) > 1 else results[key][lr]["q"][-last:]
+                upper_quantiles = (
+                    np.stack(results[key][lr]["q"])[-last:, -1]
+                    if len(np.stack(scores).shape) > 1
+                    else results[key][lr]["q"][-last:]
+                )
                 upper_quantiles = np.clip(upper_quantiles, low_clip, high_clip)[-last:]
                 # Plot the scores and quantiles
-                axs[j,i].plot(xlabels_nonscores[-last:], upper_scores,linewidth=linewidth,alpha=transparency/4,color=cmap_lines[-1])
+                axs[j, i].plot(
+                    xlabels_nonscores[-last:],
+                    upper_scores,
+                    linewidth=linewidth,
+                    alpha=transparency / 4,
+                    color=cmap_lines[-1],
+                )
                 label = f"lr={lr}" if lr is not None else None
-                axs[j,i].plot(xlabels_nonscores[-last:], upper_quantiles, linewidth=linewidth, color=color, alpha=transparency, label=label)
+                axs[j, i].plot(
+                    xlabels_nonscores[-last:],
+                    upper_quantiles,
+                    linewidth=linewidth,
+                    color=color,
+                    alpha=transparency,
+                    label=label,
+                )
                 if label is not None:
-                    axs[j,i].legend(handlelength=0.0,handletextpad=-0.1)
+                    axs[j, i].legend(handlelength=0.0, handletextpad=-0.1)
                 j = j + 1
-            axs[0,i].set_title(method_title_map[key])
+            axs[0, i].set_title(method_title_map[key])
             i = i + 1
-        axs[0,0].plot(xlabels_nonscores[-last:], upper_scores,linewidth=linewidth,alpha=transparency,color=cmap_lines[-1])
-        axs[0,0].set_title('Scores')
+        axs[0, 0].plot(
+            xlabels_nonscores[-last:],
+            upper_scores,
+            linewidth=linewidth,
+            alpha=transparency,
+            color=cmap_lines[-1],
+        )
+        axs[0, 0].set_title("Scores")
         plt.ylim([low_clip, high_clip])
-        fig.supxlabel('Time')
-        fig.supylabel(r'$q_t$')
+        fig.supxlabel("Time")
+        fig.supylabel(r"$q_t$")
         plt.tight_layout(pad=0.05)
         plt.subplots_adjust(left=0.07, bottom=0.07, right=0.95, wspace=0.2, hspace=0.1)
         plt.savefig(plots_folder + "size_zoomed.pdf")
 
         # Plot sets (zoomed)
         if real_data:
-            sns.set_theme(context="notebook", palette=cmap_lines, style="white", font_scale=4)
-            sns.set_style({'axes.spines.right': False, 'axes.spines.top': False})
+            sns.set_theme(
+                context="notebook", palette=cmap_lines, style="white", font_scale=4
+            )
+            sns.set_style({"axes.spines.right": False, "axes.spines.top": False})
             if listlike_forecast:
                 forecasts_zoomed = [forecast[-last:] for forecast in forecasts]
             else:
                 forecasts_zoomed = forecasts[-last:]
-            y_zoomed = data['y'].to_numpy().astype(float)[-last:]
-            fig, axs = plt.subplots(nrows=nrows, ncols=ncols+1, sharex=True, sharey=True, figsize = ((ncols + 1)*10.1, nrows*6.4))
+            y_zoomed = data["y"].to_numpy().astype(float)[-last:]
+            fig, axs = plt.subplots(
+                nrows=nrows,
+                ncols=ncols + 1,
+                sharex=True,
+                sharey=True,
+                figsize=((ncols + 1) * 10.1, nrows * 6.4),
+            )
             # Find limits
             i = 1
             y_clip_low = np.nanmin(y_zoomed) * 0.8
             y_clip_high = np.nanmax(y_zoomed) * 1.2
             for key in results.keys():
-                color = lighten_color(desaturate_color(cmap_lines[i-1], saturation=0.3), 0.5)
+                color = lighten_color(
+                    desaturate_color(cmap_lines[i - 1], saturation=0.3), 0.5
+                )
                 j = 0
                 for lr in results[key].keys():
                     sets_zoomed = np.stack(results[key][lr]["sets"])[-last:]
                     sets_zoomed = np.clip(sets_zoomed, y_clip_low, y_clip_high)
                     results[key][lr]["sets_zoomed"] = sets_zoomed
-                    cvds_zoomed = (sets_zoomed[:,0] <= y_zoomed) & (sets_zoomed[:,1] >= y_zoomed)
-                    axs[j,i].plot(np.arange(y_zoomed.shape[0]), y_zoomed, color='black', alpha=0.2)
+                    cvds_zoomed = (sets_zoomed[:, 0] <= y_zoomed) & (
+                        sets_zoomed[:, 1] >= y_zoomed
+                    )
+                    axs[j, i].plot(
+                        np.arange(y_zoomed.shape[0]), y_zoomed, color="black", alpha=0.2
+                    )
                     label = f"lr={lr}" if lr is not None else None
-                    axs[j,i].fill_between(np.arange(y_zoomed.shape[0]), sets_zoomed[:,0], sets_zoomed[:,1], color=color, alpha=transparency, label=label)
+                    axs[j, i].fill_between(
+                        np.arange(y_zoomed.shape[0]),
+                        sets_zoomed[:, 0],
+                        sets_zoomed[:, 1],
+                        color=color,
+                        alpha=transparency,
+                        label=label,
+                    )
                     if label is not None:
-                        axs[j,i].legend(handlelength=0.0,handletextpad=-0.1)
+                        axs[j, i].legend(handlelength=0.0, handletextpad=-0.1)
                     j = j + 1
-                axs[0,i].set_title(method_title_map[key])
+                axs[0, i].set_title(method_title_map[key])
                 i = i + 1
-            axs[0,0].plot(np.arange(y_zoomed.shape[0]),y_zoomed,linewidth=linewidth,alpha=transparency,color='black',label="ground truth")
-            axs[0,0].legend()
+            axs[0, 0].plot(
+                np.arange(y_zoomed.shape[0]),
+                y_zoomed,
+                linewidth=linewidth,
+                alpha=transparency,
+                color="black",
+                label="ground truth",
+            )
+            axs[0, 0].legend()
             if listlike_forecast:
-                axs[1,0].plot(np.array(forecasts_zoomed[1]),linewidth=linewidth,alpha=transparency,color='green', label="forecast")
+                axs[1, 0].plot(
+                    np.array(forecasts_zoomed[1]),
+                    linewidth=linewidth,
+                    alpha=transparency,
+                    color="green",
+                    label="forecast",
+                )
             else:
-                axs[1,0].plot(forecasts_zoomed.to_numpy(),linewidth=linewidth,alpha=transparency,color='green', label="forecast")
-            axs[1,0].legend()
-            axs[0,0].set_title("y")
+                axs[1, 0].plot(
+                    forecasts_zoomed.to_numpy(),
+                    linewidth=linewidth,
+                    alpha=transparency,
+                    color="green",
+                    label="forecast",
+                )
+            axs[1, 0].legend()
+            axs[0, 0].set_title("y")
             plt.ylim([y_clip_low, y_clip_high])
-            fig.supxlabel('Time')
-            fig.supylabel(r'$\mathcal{C}_t$')
+            fig.supxlabel("Time")
+            fig.supylabel(r"$\mathcal{C}_t$")
             plt.tight_layout(pad=0.05)
             plt.subplots_adjust(left=0.07, bottom=0.07, right=0.95, wspace=0.2)
             plt.savefig(plots_folder + "sets_zoomed.pdf")
 
         # Plot sets
         if real_data:
-            sns.set_theme(context="notebook", palette=cmap_lines, style="white", font_scale=4)
-            sns.set_style({'axes.spines.right': False, 'axes.spines.top': False})
+            sns.set_theme(
+                context="notebook", palette=cmap_lines, style="white", font_scale=4
+            )
+            sns.set_style({"axes.spines.right": False, "axes.spines.top": False})
             if listlike_forecast:
-                forecasts_zoomed = [forecast[T_burnin+1:] for forecast in forecasts]
+                forecasts_zoomed = [forecast[T_burnin + 1 :] for forecast in forecasts]
             else:
-                forecasts_zoomed = forecasts[T_burnin+1:]
-            y_zoomed = data['y'].to_numpy().astype(float)[T_burnin+1:]
-            fig, axs = plt.subplots(nrows=nrows, ncols=ncols+1, sharex=True, sharey=True, figsize = ((ncols + 1)*10.1, nrows*6.4))
+                forecasts_zoomed = forecasts[T_burnin + 1 :]
+            y_zoomed = data["y"].to_numpy().astype(float)[T_burnin + 1 :]
+            fig, axs = plt.subplots(
+                nrows=nrows,
+                ncols=ncols + 1,
+                sharex=True,
+                sharey=True,
+                figsize=((ncols + 1) * 10.1, nrows * 6.4),
+            )
             # Find limits
             i = 1
             y_clip_low = np.nanmin(y_zoomed) * 0.8
             y_clip_high = np.nanmax(y_zoomed) * 1.2
             for key in results.keys():
-                color = lighten_color(desaturate_color(cmap_lines[i-1], saturation=0.3), 0.5)
+                color = lighten_color(
+                    desaturate_color(cmap_lines[i - 1], saturation=0.3), 0.5
+                )
                 j = 0
                 for lr in results[key].keys():
-                    sets_zoomed = np.stack(results[key][lr]["sets"])[T_burnin+1:]
+                    sets_zoomed = np.stack(results[key][lr]["sets"])[T_burnin + 1 :]
                     sets_zoomed = np.clip(sets_zoomed, y_clip_low, y_clip_high)
                     results[key][lr]["sets_zoomed"] = sets_zoomed
-                    cvds_zoomed = (sets_zoomed[:,0] <= y_zoomed) & (sets_zoomed[:,1] >= y_zoomed)
-                    axs[j,i].plot(np.arange(y_zoomed.shape[0]), y_zoomed, color='black', alpha=0.2)
+                    cvds_zoomed = (sets_zoomed[:, 0] <= y_zoomed) & (
+                        sets_zoomed[:, 1] >= y_zoomed
+                    )
+                    axs[j, i].plot(
+                        np.arange(y_zoomed.shape[0]), y_zoomed, color="black", alpha=0.2
+                    )
                     label = f"lr={lr}" if lr is not None else None
-                    axs[j,i].fill_between(np.arange(y_zoomed.shape[0]), sets_zoomed[:,0], sets_zoomed[:,1], color=color, alpha=transparency, label=label)
+                    axs[j, i].fill_between(
+                        np.arange(y_zoomed.shape[0]),
+                        sets_zoomed[:, 0],
+                        sets_zoomed[:, 1],
+                        color=color,
+                        alpha=transparency,
+                        label=label,
+                    )
                     if label is not None:
-                        axs[j,i].legend(handlelength=0.0,handletextpad=-0.1)
+                        axs[j, i].legend(handlelength=0.0, handletextpad=-0.1)
                     j = j + 1
-                axs[0,i].set_title(method_title_map[key])
+                axs[0, i].set_title(method_title_map[key])
                 i = i + 1
-            axs[0,0].plot(y_zoomed,linewidth=linewidth,alpha=transparency,color='black',label="ground truth")
-            axs[0,0].legend()
+            axs[0, 0].plot(
+                y_zoomed,
+                linewidth=linewidth,
+                alpha=transparency,
+                color="black",
+                label="ground truth",
+            )
+            axs[0, 0].legend()
             if listlike_forecast:
-                axs[1,0].plot(np.array([forecast[1] for forecast in forecasts]),linewidth=linewidth,alpha=transparency,color='green', label=r'$1-\alpha/2$ forecast')
-                axs[2,0].plot(np.array([forecast[0] for forecast in forecasts]),linewidth=linewidth,alpha=transparency,color='green', label=r'$\alpha/2$ forecast')
-                axs[2,0].legend()
+                axs[1, 0].plot(
+                    np.array([forecast[1] for forecast in forecasts]),
+                    linewidth=linewidth,
+                    alpha=transparency,
+                    color="green",
+                    label=r"$1-\alpha/2$ forecast",
+                )
+                axs[2, 0].plot(
+                    np.array([forecast[0] for forecast in forecasts]),
+                    linewidth=linewidth,
+                    alpha=transparency,
+                    color="green",
+                    label=r"$\alpha/2$ forecast",
+                )
+                axs[2, 0].legend()
             else:
-                axs[1,0].plot(forecasts_zoomed.to_numpy(),linewidth=linewidth,alpha=transparency,color='green', label="forecast")
-            axs[1,0].legend()
-            axs[0,0].set_title("y")
+                axs[1, 0].plot(
+                    forecasts_zoomed.to_numpy(),
+                    linewidth=linewidth,
+                    alpha=transparency,
+                    color="green",
+                    label="forecast",
+                )
+            axs[1, 0].legend()
+            axs[0, 0].set_title("y")
             plt.ylim([y_clip_low, y_clip_high])
-            fig.supxlabel('Time')
-            fig.supylabel(r'$\mathcal{C}_t$')
+            fig.supxlabel("Time")
+            fig.supylabel(r"$\mathcal{C}_t$")
             plt.tight_layout(pad=0.05)
             plt.subplots_adjust(left=0.07, bottom=0.07, right=0.95, wspace=0.2)
             plt.savefig(plots_folder + "sets.pdf")
