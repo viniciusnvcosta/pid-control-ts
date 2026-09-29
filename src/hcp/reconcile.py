@@ -9,6 +9,7 @@ towards its diagonal with the Schafer & Strimmer (2005) lambda. Each quantile le
 reconciled with the same projection; levels that cross afterwards are re-sorted.
 """
 
+import warnings
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -24,11 +25,13 @@ class Reconciled:
     Attributes:
         q: ``[n_nodes, T, 3]``; NaN in weeks before the MinT warm-up.
         crossings: Number of (node, week) cells whose levels had to be re-sorted.
+        root_crossings: Same count restricted to node 0 (the US row).
         shrinkage: MinT lambda per week ``[T]``; NaN where no covariance was estimated.
     """
 
     q: np.ndarray
     crossings: int
+    root_crossings: int
     shrinkage: np.ndarray
 
 
@@ -140,6 +143,26 @@ def evaluation_start(bundle: HierarchyBundle, warmup: int) -> int:
     )
 
 
+def crossing_mask(q: np.ndarray, rtol: float = 1e-9) -> np.ndarray:
+    """``[n_nodes, T]`` True where levels decrease by more than ``rtol * max(1, |q|)``; NaN cells are False.
+
+    Args:
+        q: Quantile levels ``[n_nodes, T, n_levels]``.
+        rtol: Relative tolerance; a decrease is ignored unless it exceeds
+            ``rtol`` times the scale of the cell.
+
+    Returns:
+        Boolean mask ``[n_nodes, T]``.
+    """
+    diffs = np.diff(q, axis=-1)
+    defined = np.isfinite(q).all(axis=-1)
+    with warnings.catch_warnings():
+        # all-NaN cells (not yet defined) warn on nanmax; their scale is unused below.
+        warnings.filterwarnings("ignore", message="All-NaN slice encountered")
+        scale = np.maximum(1.0, np.nanmax(np.abs(q), axis=-1))
+    return (diffs < -rtol * scale[..., None]).any(axis=-1) & defined
+
+
 def reconcile_bundle(bundle: HierarchyBundle, method: str, warmup: int) -> Reconciled:
     """Reconcile every week; MinT re-estimates its covariance causally each week.
 
@@ -166,8 +189,10 @@ def reconcile_bundle(bundle: HierarchyBundle, method: str, warmup: int) -> Recon
                 continue
             covariance, shrinkage[t] = shrinkage_covariance(errors)
         out[:, t, :] = reconcile(bundle.q[:, t, :], S, method, covariance=covariance)
-    defined = np.isfinite(out).all(axis=-1)
-    crossed = (np.diff(out, axis=-1) < 0).any(axis=-1) & defined
+    crossed = crossing_mask(out)
     return Reconciled(
-        q=np.sort(out, axis=-1), crossings=int(crossed.sum()), shrinkage=shrinkage
+        q=np.sort(out, axis=-1),
+        crossings=int(crossed.sum()),
+        root_crossings=int(crossed[0].sum()),
+        shrinkage=shrinkage,
     )

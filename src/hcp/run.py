@@ -210,11 +210,13 @@ def run_experiment(cfg: RunConfig, bundle: HierarchyBundle) -> ExperimentResult:
             "max_abs": float(np.nanmax(np.abs(gap))),
         },
         "crossings": {},
+        "root_crossings": {},
     }
     frames = []
     for reconciler in cfg.reconcilers:
         reconciled = reconcile_bundle(bundle, reconciler, cfg.mint_warmup)
         diagnostics["crossings"][reconciler] = reconciled.crossings
+        diagnostics["root_crossings"][reconciler] = reconciled.root_crossings
         if reconciler == "mint_shrink":
             diagnostics["mean_shrinkage"] = float(np.mean(reconciled.shrinkage[t0:]))
         q_us = reconciled.q[0, t0:, :]

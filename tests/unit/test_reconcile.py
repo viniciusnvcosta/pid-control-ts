@@ -8,6 +8,7 @@ import pytest
 from hcp.reconcile import (
     RECONCILERS,
     available_errors,
+    crossing_mask,
     evaluation_start,
     reconcile,
     reconcile_bundle,
@@ -104,10 +105,30 @@ def test_warmup_below_two_raises(hier_bundle) -> None:
         reconcile_bundle(hier_bundle, "mint_shrink", 1)
 
 
+def test_crossing_mask_uses_relative_tolerance_and_ignores_nan() -> None:
+    q = np.array(
+        [
+            [[1.0, 2.0, 2.0 - 1e-12]],  # ~1e-12 inversion: below tolerance
+            [[1.0, 2.0, 1.0]],  # 1.0 inversion: above tolerance
+            [[1.0, np.nan, 1.0]],  # NaN cell: never counted
+        ]
+    )
+    np.testing.assert_array_equal(crossing_mask(q), [[False], [True], [False]])
+
+
 def test_none_bundle_equals_base(hier_bundle) -> None:
     rec = reconcile_bundle(hier_bundle, "none", WARMUP)
     np.testing.assert_array_equal(rec.q, hier_bundle.q)
     assert rec.crossings == 0
+    assert rec.root_crossings == 0
+
+
+@pytest.mark.parametrize("method", ["bottom_up", "mint_shrink"])
+def test_root_crossings_counts_only_row_zero(hier_bundle, method: str) -> None:
+    rec = reconcile_bundle(hier_bundle, method, WARMUP)
+    if method == "bottom_up":
+        assert rec.root_crossings == 0
+    assert rec.root_crossings <= rec.crossings
 
 
 @pytest.mark.parametrize("method", ["bottom_up", "mint_shrink"])

@@ -75,6 +75,11 @@ def test_run_experiment_arm_grid_and_parity(hier_bundle) -> None:
     assert result.diagnostics["n_weeks"] == n_weeks
     assert result.diagnostics["imputed_cells"] == 1
     assert set(result.diagnostics["crossings"]) == {"none", "bottom_up", "mint_shrink"}
+    assert set(result.diagnostics["root_crossings"]) == {
+        "none",
+        "bottom_up",
+        "mint_shrink",
+    }
 
 
 def test_truth_incoherence_is_scoped_to_the_evaluation_window(hier_bundle) -> None:
