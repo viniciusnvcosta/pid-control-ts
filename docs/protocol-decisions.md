@@ -21,4 +21,12 @@
 | D13 | `pid_theta` runs in a temporary working directory, so core's `.cache/scorecaster` is never reused across runs. |
 | D14 | The upstream Theta scorecaster in `core/methods.py:250` assigned the whole `ThetaModel.forecast(ahead)` Series into a scalar slot and crashed under current numpy/pandas for every `ahead`. It now takes the ahead-step value, `model.forecast(ahead).iloc[-1]`. This is the only change to `core/` besides `np.infty` → `np.inf`, and both are pinned by `tests/unit/test_core_characterization.py`. |
 
+## 2026-09-29 (continued)
+
+| # | Decision |
+|---|---|
+| D15 | **Upstream properties kept, documented.** (1) core's proportional learning rate `lr_t = lr * range(scores[t-T_burnin:t])` sets `q[t+1]` using scores up to `t-1` while only scores up to `t-ahead+1` are known — ~2 weeks of look-ahead in the step size for PI/PID at `ahead = 4`; inherited from the paper, identical across arms so paired contrasts stay fair, but PI/PID are not strictly causal in the lr scale. (2) the Theta scorecaster trains on `scores[:t_pred]` and stores `forecast(ahead)` at index `t + ahead`, so the scorecast used for target τ is a forecast of `s[τ−4]` from data to `τ−8` (2·ahead stale); PID-Theta results are labelled "paper-core scorecaster (2·ahead stale)" and are not evidence about an aligned PID. (3) evaluation and MinT errors use final revised truth (as in the paper), not as-of vintages. |
+| D16 | **Start-up caveat on the primary endpoint.** Controllers are re-initialised at `evaluation_start` (2021-01-16, winter-wave peak; 112 weeks); the rolling-coverage endpoint is dominated by the start-up transient (PI offsets jump then decay slowly), so the primary contrast reflects transient plus steady state. PI over-coverage (0.90–0.96 vs 0.80) is a property of the controller on a conservative base with 4-week feedback delay, not an adapter bug (wiring pinned by `test_pi_matches_paper_harness_wiring`). |
+| D17 | **Reporting clarifications.** Contrasts are computed only at `lr` (`lr_grid` results are descriptive metrics); contrasts at non-primary block lengths are Holm-adjusted inside the secondary family; with `block < rolling_window` the rolling/run metrics straddle block joins in resamples; MinT may produce negative lower quantiles on small leaves (US row unaffected); crossings are counted with relative tolerance 1e-9 and reported separately for the US row (amends D8's count). |
+
 New decisions are appended with a date; old ones are never deleted. This file overrides plans.
