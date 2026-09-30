@@ -1,0 +1,20 @@
+# Pre-registered primary run (docs/protocol-decisions.md D1-D12).
+# Paths are relative to the project root: run `uv run python -m hcp.run configs/us_hier.toml` from there.
+run_id = "us-hier-v1"
+root_seed = 20260929
+data_path = "data/deaths.csv"
+expected_sha256 = "cb4dccfd21d6c08b1247aa9a7c6a8d93f7c373871526cfcb4860df884b54ac06"
+output_dir = "results"
+alpha = 0.2
+lr = 0.1
+lr_grid = [1.0, 0.5, 0.1, 0.05]
+Csat = 2.0
+KI = 1000.0
+T_burnin = 5
+ahead = 4
+reconcilers = ["none", "bottom_up", "mint_shrink"]
+controllers = ["raw", "pi", "pid_theta"]
+mint_warmup = 20
+rolling_window = 10
+blocks = [8, 4, 12]
+n_boot = 2000
