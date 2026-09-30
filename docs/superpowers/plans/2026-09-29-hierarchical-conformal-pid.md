@@ -300,7 +300,11 @@ def synthetic_rows(seed: int = 0) -> list[dict]:
                 row[column] = median * (1 + 1.5 * (level - 0.5))
             rows.append(row)
             rows.append(
-                {**row, "forecaster": "COVIDhub-baseline", **dict.fromkeys(QUANTILE_COLUMNS, -1.0)}
+                {
+                    **row,
+                    "forecaster": "COVIDhub-baseline",
+                    **dict.fromkeys(QUANTILE_COLUMNS, -1.0),
+                }
             )
             rows.append({**row, "ahead": 1, **dict.fromkeys(QUANTILE_COLUMNS, -2.0)})
     return rows
@@ -340,7 +344,9 @@ from tests.helpers import synthetic_rows
 @pytest.fixture
 def hier_csv(tmp_path: Path) -> Path:
     path = tmp_path / "deaths.csv"
-    pd.DataFrame(synthetic_rows()).to_csv(path)  # index column mimics the real leading ""
+    pd.DataFrame(synthetic_rows()).to_csv(
+        path
+    )  # index column mimics the real leading ""
     return path
 
 
@@ -543,7 +549,9 @@ def load_hierarchy(path: Path, expected_sha256: str | None = None) -> HierarchyB
     if ROOT not in set(frame["geo_value"]):
         raise ValueError(f"root series {ROOT!r} is missing")
     nodes = (ROOT, *sorted(set(frame["geo_value"]) - {ROOT}))
-    root = frame[frame["geo_value"] == ROOT].dropna(subset=[*QUANTILE_COLUMNS, "actual"])
+    root = frame[frame["geo_value"] == ROOT].dropna(
+        subset=[*QUANTILE_COLUMNS, "actual"]
+    )
     dates = pd.DatetimeIndex(sorted(root["target_end_date"]))
 
     def wide(column: str) -> np.ndarray:
@@ -552,7 +560,10 @@ def load_hierarchy(path: Path, expected_sha256: str | None = None) -> HierarchyB
 
     raw_q = np.stack([wide(column) for column in QUANTILE_COLUMNS], axis=-1)
     filled = np.stack(
-        [pd.DataFrame(raw_q[:, :, k].T).ffill().to_numpy().T for k in range(raw_q.shape[-1])],
+        [
+            pd.DataFrame(raw_q[:, :, k].T).ffill().to_numpy().T
+            for k in range(raw_q.shape[-1])
+        ],
         axis=-1,
     )
     complete = np.isfinite(filled).all(axis=(0, 2))
@@ -560,7 +571,9 @@ def load_hierarchy(path: Path, expected_sha256: str | None = None) -> HierarchyB
         raise ValueError("no week has forecasts for every node")
     start = int(np.argmax(complete))
     imputed = np.isnan(raw_q).any(axis=-1) & np.isfinite(filled).all(axis=-1)
-    forecast_dates = frame.groupby("target_end_date")["forecast_date"].min().reindex(dates)
+    forecast_dates = (
+        frame.groupby("target_end_date")["forecast_date"].min().reindex(dates)
+    )
     arrays = {
         "dates": dates.to_numpy()[start:],
         "forecast_dates": forecast_dates.to_numpy()[start:],
@@ -798,7 +811,9 @@ def test_mint_is_prefix_invariant(hier_bundle) -> None:
 def test_mint_ignores_truth_unknown_at_forecast_date(hier_bundle) -> None:
     t = 12
     y = hier_bundle.y.copy()
-    y[:, t - 3 :] = 1e9  # targets less than 4 weeks before t are unknown at its forecast date
+    y[:, t - 3 :] = (
+        1e9  # targets less than 4 weeks before t are unknown at its forecast date
+    )
     leaked = reconcile_bundle(replace(hier_bundle, y=y), "mint_shrink", WARMUP)
     clean = reconcile_bundle(hier_bundle, "mint_shrink", WARMUP)
     np.testing.assert_array_equal(leaked.q[:, t], clean.q[:, t])
@@ -879,7 +894,9 @@ def shrinkage_covariance(errors: np.ndarray) -> tuple[np.ndarray, float]:
     return covariance, lam
 
 
-def _none(base: np.ndarray, _S: np.ndarray, _covariance: np.ndarray | None) -> np.ndarray:
+def _none(
+    base: np.ndarray, _S: np.ndarray, _covariance: np.ndarray | None
+) -> np.ndarray:
     return base.copy()
 
 
@@ -944,7 +961,9 @@ def evaluation_start(bundle: HierarchyBundle, warmup: int) -> int:
     for t in range(len(bundle.dates)):
         if len(available_errors(bundle, t)) >= warmup:
             return t
-    raise ValueError(f"fewer than {warmup} complete error weeks before the last forecast")
+    raise ValueError(
+        f"fewer than {warmup} complete error weeks before the last forecast"
+    )
 
 
 def reconcile_bundle(bundle: HierarchyBundle, method: str, warmup: int) -> Reconciled:
@@ -1045,7 +1064,9 @@ def test_cqr_scores_match_paper_pickles(state: str) -> None:
     keep = np.isfinite(y)
     forecasts = np.stack(frame["forecasts"].to_numpy())[keep]
     paper = np.stack(frame["scores"].to_numpy())[keep].astype(float)
-    np.testing.assert_allclose(cqr_scores(y[keep], forecasts[:, 0], forecasts[:, 1]), paper)
+    np.testing.assert_allclose(
+        cqr_scores(y[keep], forecasts[:, 0], forecasts[:, 1]), paper
+    )
 
 
 def test_raw_returns_base_interval() -> None:
@@ -1068,8 +1089,12 @@ def test_pi_matches_paper_harness_wiring() -> None:
         "config_name": "parity",
         "ahead": cfg.ahead,
     }
-    q_lo = quantile_integrator_log(scores[:, 0], cfg.alpha / 2, cfg.lr, upper=False, **kwargs)
-    q_hi = quantile_integrator_log(scores[:, 1], cfg.alpha / 2, cfg.lr, upper=True, **kwargs)
+    q_lo = quantile_integrator_log(
+        scores[:, 0], cfg.alpha / 2, cfg.lr, upper=False, **kwargs
+    )
+    q_hi = quantile_integrator_log(
+        scores[:, 1], cfg.alpha / 2, cfg.lr, upper=True, **kwargs
+    )
     out_lo, out_hi = conformalize(y, lo, hi, "pi", cfg)
     np.testing.assert_array_equal(out_lo, lo - q_lo["q"])
     np.testing.assert_array_equal(out_hi, hi + q_hi["q"])
@@ -1204,7 +1229,9 @@ def conformalize(
     """
     if controller not in CONTROLLERS:
         raise ValueError(f"unknown controller: {controller}")
-    if not (np.isfinite(y).all() and np.isfinite(q_lo).all() and np.isfinite(q_hi).all()):
+    if not (
+        np.isfinite(y).all() and np.isfinite(q_lo).all() and np.isfinite(q_hi).all()
+    ):
         raise ValueError("truth and base quantiles must be finite")
     scores = cqr_scores(y, q_lo, q_hi)
     offset_lo = CONTROLLERS[controller](scores[:, 0], cfg, False)
@@ -1265,7 +1292,9 @@ HI = np.array([10.0, 10.0, 10.0, 10.0])
 
 
 def test_coverage_is_inclusive() -> None:
-    hit = coverage_indicator(np.array([1.0, 2, 3, 4]), np.array([1.0, 0, 4, 0]), np.array([2.0, 1, 5, 4]))
+    hit = coverage_indicator(
+        np.array([1.0, 2, 3, 4]), np.array([1.0, 0, 4, 0]), np.array([2.0, 1, 5, 4])
+    )
     np.testing.assert_array_equal(hit, [True, False, False, True])
 
 
@@ -1287,7 +1316,9 @@ def test_longest_miss_run() -> None:
 
 
 def test_interval_score_hand_values() -> None:
-    np.testing.assert_allclose(interval_score(Y[:3], LO[:3], HI[:3], 0.2), [10.0, 19.0, 30.0])
+    np.testing.assert_allclose(
+        interval_score(Y[:3], LO[:3], HI[:3], 0.2), [10.0, 19.0, 30.0]
+    )
 
 
 def test_evaluate_hand_values() -> None:
@@ -1447,7 +1478,9 @@ class Contrast:
     p_value: float
 
 
-def draw_blocks(n: int, block: int, n_boot: int, rng: np.random.Generator) -> np.ndarray:
+def draw_blocks(
+    n: int, block: int, n_boot: int, rng: np.random.Generator
+) -> np.ndarray:
     """Moving-block bootstrap indices ``[n_boot, n]`` built from contiguous blocks.
 
     Raises:
@@ -1533,9 +1566,16 @@ def _intervals() -> pd.DataFrame:
             frames.append(
                 pd.DataFrame(
                     {
-                        "week": weeks, "reconciler": reconciler, "controller": controller,
-                        "lr": lr, "y": y, "q_lo": y - 1, "q_med": y, "q_hi": y + 1,
-                        "lo": y - rng.uniform(0, 2, 30), "hi": y + rng.uniform(0, 2, 30),
+                        "week": weeks,
+                        "reconciler": reconciler,
+                        "controller": controller,
+                        "lr": lr,
+                        "y": y,
+                        "q_lo": y - 1,
+                        "q_med": y,
+                        "q_hi": y + 1,
+                        "lo": y - rng.uniform(0, 2, 30),
+                        "hi": y + rng.uniform(0, 2, 30),
                     }
                 )
             )
@@ -1545,9 +1585,18 @@ def _intervals() -> pd.DataFrame:
 def _contrasts() -> pd.DataFrame:
     rows = [
         {
-            "block": 8, "controller": controller, "lr": lr, "treatment": treatment,
-            "control": "none", "metric": "coverage_deviation", "estimate": -0.01,
-            "low": -0.05, "high": 0.03, "p_value": 0.4, "p_holm": 0.8, "primary": False,
+            "block": 8,
+            "controller": controller,
+            "lr": lr,
+            "treatment": treatment,
+            "control": "none",
+            "metric": "coverage_deviation",
+            "estimate": -0.01,
+            "low": -0.05,
+            "high": 0.03,
+            "p_value": 0.4,
+            "p_holm": 0.8,
+            "primary": False,
         }
         for controller, lr in (("raw", 0.0), ("pi", 0.1))
         for treatment in ("bottom_up", "mint_shrink")
@@ -1557,7 +1606,13 @@ def _contrasts() -> pd.DataFrame:
 
 def test_render_figures_writes_every_pdf(tmp_path: Path) -> None:
     paths = render_figures(
-        _intervals(), _contrasts(), tmp_path / "figures", alpha=0.2, window=5, lr=0.1, block=8
+        _intervals(),
+        _contrasts(),
+        tmp_path / "figures",
+        alpha=0.2,
+        window=5,
+        lr=0.1,
+        block=8,
     )
     names = sorted(path.name for path in paths)
     assert names == [
@@ -1588,11 +1643,19 @@ from matplotlib.figure import Figure
 from hcp.evaluate import coverage_indicator, rolling_coverage
 
 RAW_LR = 0.0
-RECONCILER_COLORS = {"none": "#6b7280", "bottom_up": "#2563eb", "mint_shrink": "#d97706"}
+RECONCILER_COLORS = {
+    "none": "#6b7280",
+    "bottom_up": "#2563eb",
+    "mint_shrink": "#d97706",
+}
 
 
-def _arms(intervals: pd.DataFrame, controller: str, lr: float) -> dict[str, pd.DataFrame]:
-    selected = intervals[(intervals["controller"] == controller) & (intervals["lr"] == lr)]
+def _arms(
+    intervals: pd.DataFrame, controller: str, lr: float
+) -> dict[str, pd.DataFrame]:
+    selected = intervals[
+        (intervals["controller"] == controller) & (intervals["lr"] == lr)
+    ]
     return {name: group for name, group in selected.groupby("reconciler", sort=False)}
 
 
@@ -1647,7 +1710,14 @@ def intervals_figure(intervals: pd.DataFrame, *, controller: str, lr: float) -> 
         )
         truth = (weeks, group["y"].to_numpy())
     if truth is not None:
-        axes.plot(*truth, color="black", marker="o", markersize=2, linewidth=0.8, label="truth")
+        axes.plot(
+            *truth,
+            color="black",
+            marker="o",
+            markersize=2,
+            linewidth=0.8,
+            label="truth",
+        )
     axes.set_ylabel("Weekly deaths")
     axes.set_title(f"US 80% intervals · {controller}, lr={lr}")
     axes.spines[["top", "right"]].set_visible(False)
@@ -1704,7 +1774,9 @@ def render_figures(
         figures[f"intervals_{controller}.pdf"] = intervals_figure(
             intervals, controller=controller, lr=arm_lr
         )
-    figures["contrasts_coverage_deviation.pdf"] = contrasts_figure(contrasts, block=block)
+    figures["contrasts_coverage_deviation.pdf"] = contrasts_figure(
+        contrasts, block=block
+    )
     paths = []
     for name, figure in figures.items():
         path = out_dir / name
@@ -1772,7 +1844,9 @@ SMALL = {
 
 
 def test_load_config_converts_lists_and_paths(tmp_path: Path) -> None:
-    path = write_config(tmp_path / "c.toml", {**BASE, "blocks": [8, 4], "lr_grid": [0.1, 0.5]})
+    path = write_config(
+        tmp_path / "c.toml", {**BASE, "blocks": [8, 4], "lr_grid": [0.1, 0.5]}
+    )
     cfg = load_config(path)
     assert cfg.blocks == (8, 4)
     assert cfg.lr_grid == (0.1, 0.5)
@@ -1859,12 +1933,30 @@ def _config(tmp_path: Path, csv: Path) -> Path:
 def test_cli_writes_every_artifact(tmp_path: Path, hier_csv: Path) -> None:
     assert main([str(_config(tmp_path, hier_csv))]) == 0
     out = tmp_path / "results" / "e2e"
-    for name in ("manifest.json", "intervals.parquet", "metrics.parquet", "contrasts.parquet"):
+    for name in (
+        "manifest.json",
+        "intervals.parquet",
+        "metrics.parquet",
+        "contrasts.parquet",
+    ):
         assert (out / name).is_file(), name
     figures = {path.name for path in (out / "figures").glob("*.pdf")}
-    assert {"rolling_coverage_pi.pdf", "rolling_coverage_pid_theta.pdf", "contrasts_coverage_deviation.pdf"} <= figures
+    assert {
+        "rolling_coverage_pi.pdf",
+        "rolling_coverage_pid_theta.pdf",
+        "contrasts_coverage_deviation.pdf",
+    } <= figures
     manifest = json.loads((out / "manifest.json").read_text())
-    expected_keys = {"config", "git_sha", "git_dirty", "timestamp_utc", "input_sha256", "seed", "versions", "diagnostics"}
+    expected_keys = {
+        "config",
+        "git_sha",
+        "git_dirty",
+        "timestamp_utc",
+        "input_sha256",
+        "seed",
+        "versions",
+        "diagnostics",
+    }
     assert expected_keys <= manifest.keys()
     assert manifest["input_sha256"] == file_sha256(hier_csv)
     assert manifest["diagnostics"]["imputed_cells"] == 1
@@ -1904,8 +1996,14 @@ pytestmark = [
 
 def test_real_run_sanity() -> None:
     cfg = RunConfig(
-        run_id="it", root_seed=1, data_path=REAL_DATA, output_dir=Path("unused"),
-        controllers=("raw", "pi"), lr_grid=(0.1,), blocks=(8,), n_boot=50,
+        run_id="it",
+        root_seed=1,
+        data_path=REAL_DATA,
+        output_dir=Path("unused"),
+        controllers=("raw", "pi"),
+        lr_grid=(0.1,),
+        blocks=(8,),
+        n_boot=50,
     )
     result = run_experiment(cfg, load_hierarchy(REAL_DATA, REAL_SHA256))
     metrics = result.metrics.set_index(["reconciler", "controller"])
@@ -1985,7 +2083,11 @@ class RunConfig:
     def __post_init__(self) -> None:
         if not self.run_id or Path(self.run_id).name != self.run_id:
             raise ValueError("run_id must be a bare directory name")
-        if isinstance(self.root_seed, bool) or not isinstance(self.root_seed, int) or self.root_seed < 0:
+        if (
+            isinstance(self.root_seed, bool)
+            or not isinstance(self.root_seed, int)
+            or self.root_seed < 0
+        ):
             raise ValueError("root_seed must be a non-negative integer")
         for name in ("lr_grid", "reconcilers", "controllers", "blocks"):
             object.__setattr__(self, name, tuple(getattr(self, name)))
@@ -2031,7 +2133,12 @@ def load_config(path: Path) -> RunConfig:
 
 def _controller_config(cfg: RunConfig, lr: float) -> ControllerConfig:
     return ControllerConfig(
-        alpha=cfg.alpha, lr=lr, Csat=cfg.Csat, KI=cfg.KI, T_burnin=cfg.T_burnin, ahead=cfg.ahead
+        alpha=cfg.alpha,
+        lr=lr,
+        Csat=cfg.Csat,
+        KI=cfg.KI,
+        T_burnin=cfg.T_burnin,
+        ahead=cfg.ahead,
     )
 
 
@@ -2062,7 +2169,13 @@ def _contrasts(cfg: RunConfig, intervals: pd.DataFrame) -> pd.DataFrame:
             boot = {
                 r: pd.DataFrame(
                     [
-                        evaluate(y[ix], lo[ix], hi[ix], alpha=cfg.alpha, window=cfg.rolling_window)
+                        evaluate(
+                            y[ix],
+                            lo[ix],
+                            hi[ix],
+                            alpha=cfg.alpha,
+                            window=cfg.rolling_window,
+                        )
                         for ix in resamples
                     ]
                 )
@@ -2078,8 +2191,12 @@ def _contrasts(cfg: RunConfig, intervals: pd.DataFrame) -> pd.DataFrame:
                     )
                     rows.append(
                         {
-                            "block": block, "controller": controller, "lr": lr,
-                            "treatment": treatment, "control": control, "metric": metric,
+                            "block": block,
+                            "controller": controller,
+                            "lr": lr,
+                            "treatment": treatment,
+                            "control": control,
+                            "metric": metric,
                             **asdict(contrast),
                         }
                     )
@@ -2128,9 +2245,16 @@ def run_experiment(cfg: RunConfig, bundle: HierarchyBundle) -> ExperimentResult:
                 frames.append(
                     pd.DataFrame(
                         {
-                            "week": weeks, "reconciler": reconciler, "controller": controller,
-                            "lr": lr, "y": y, "q_lo": q_us[:, 0], "q_med": q_us[:, 1],
-                            "q_hi": q_us[:, 2], "lo": lo, "hi": hi,
+                            "week": weeks,
+                            "reconciler": reconciler,
+                            "controller": controller,
+                            "lr": lr,
+                            "y": y,
+                            "q_lo": q_us[:, 0],
+                            "q_med": q_us[:, 1],
+                            "q_hi": q_us[:, 2],
+                            "lo": lo,
+                            "hi": hi,
                         }
                     )
                 )
@@ -2138,10 +2262,15 @@ def run_experiment(cfg: RunConfig, bundle: HierarchyBundle) -> ExperimentResult:
     metrics = pd.DataFrame(
         [
             {
-                "reconciler": reconciler, "controller": controller, "lr": lr,
+                "reconciler": reconciler,
+                "controller": controller,
+                "lr": lr,
                 **evaluate(
-                    group["y"].to_numpy(), group["lo"].to_numpy(), group["hi"].to_numpy(),
-                    alpha=cfg.alpha, window=cfg.rolling_window,
+                    group["y"].to_numpy(),
+                    group["lo"].to_numpy(),
+                    group["hi"].to_numpy(),
+                    alpha=cfg.alpha,
+                    window=cfg.rolling_window,
                 ),
             }
             for (reconciler, controller, lr), group in intervals.groupby(
@@ -2155,12 +2284,16 @@ def run_experiment(cfg: RunConfig, bundle: HierarchyBundle) -> ExperimentResult:
 def _git(*args: str) -> str:
     completed = subprocess.run(
         ["git", "-C", str(Path(__file__).resolve().parent), *args],
-        capture_output=True, text=True, check=False,
+        capture_output=True,
+        text=True,
+        check=False,
     )
     return completed.stdout.strip()
 
 
-def write_artifacts(cfg: RunConfig, result: ExperimentResult, input_sha256: str) -> Path:
+def write_artifacts(
+    cfg: RunConfig, result: ExperimentResult, input_sha256: str
+) -> Path:
     """Write tables, figures and the manifest to ``output_dir / run_id``.
 
     Raises:
@@ -2172,8 +2305,13 @@ def write_artifacts(cfg: RunConfig, result: ExperimentResult, input_sha256: str)
     result.metrics.to_parquet(out / "metrics.parquet", index=False)
     result.contrasts.to_parquet(out / "contrasts.parquet", index=False)
     render_figures(
-        result.intervals, result.contrasts, out / "figures",
-        alpha=cfg.alpha, window=cfg.rolling_window, lr=cfg.lr, block=cfg.blocks[0],
+        result.intervals,
+        result.contrasts,
+        out / "figures",
+        alpha=cfg.alpha,
+        window=cfg.rolling_window,
+        lr=cfg.lr,
+        block=cfg.blocks[0],
     )
     manifest = {
         "config": asdict(cfg),
@@ -2203,7 +2341,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("config", type=Path)
     cfg = load_config(parser.parse_args(argv).config)
     if (cfg.output_dir / cfg.run_id).exists():
-        raise FileExistsError(f"{cfg.output_dir / cfg.run_id} exists; choose a new run_id")
+        raise FileExistsError(
+            f"{cfg.output_dir / cfg.run_id} exists; choose a new run_id"
+        )
     bundle = load_hierarchy(cfg.data_path, cfg.expected_sha256)
     result = run_experiment(cfg, bundle)
     out = write_artifacts(cfg, result, file_sha256(cfg.data_path))
