@@ -1,3 +1,7 @@
+"""
+Autoregressive process generation and fitting.
+"""
+
 import numpy as np
 
 
@@ -56,7 +60,7 @@ def fit_ar_model(Y, p, X=None):
     T = Y.shape[0]
     M = np.zeros((T - p, p))
     Yflip = np.flip(Y)
-    for i in range(0, T - p):
+    for i in range(T - p):
         M[i, :] = Yflip[i + 1 : i + 1 + p]
     M = np.flip(M, axis=0)
     M = np.flip(M, axis=1)

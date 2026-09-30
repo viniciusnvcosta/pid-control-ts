@@ -1,16 +1,12 @@
+"""
+BASELINES
+"""
+
 import os
+
 import numpy as np
-import pandas as pd
-import copy
-from statsmodels.tsa.api import ExponentialSmoothing
 from statsmodels.tsa.forecasting.theta import ThetaModel
 from tqdm import tqdm
-import pdb
-import warnings
-
-"""
-    BASELINES
-"""
 
 
 def trailing_window(
@@ -111,9 +107,7 @@ def aci(scores, alpha, lr, window_length, T_burnin, ahead, *args, **kwargs):
     return results
 
 
-"""
-    New methods
-"""
+# New methods
 
 
 def quantile(scores, alpha, lr, ahead, proportional_lr=True, *args, **kwargs):
@@ -149,7 +143,7 @@ def saturation_fn_sqrt(x, t, Csat, KI):
 def quantile_integrator_log(
     scores, alpha, lr, Csat, KI, ahead, T_burnin, proportional_lr=True, *args, **kwargs
 ):
-    data = kwargs["data"] if "data" in kwargs.keys() else None
+    data = kwargs.get("data", None)
     results = quantile_integrator_log_scorecaster(
         scores,
         alpha,
@@ -167,9 +161,7 @@ def quantile_integrator_log(
     return results
 
 
-"""
-    This is the master method for the quantile, integrator, and scorecaster methods.
-"""
+# This is the master method for the quantile, integrator, and scorecaster methods.
 
 
 def quantile_integrator_log_scorecaster(
@@ -214,12 +206,16 @@ def quantile_integrator_log_scorecaster(
                 + ".npy"
             )
             train_model = False
-    except:
+    # data may be None, the cache file may be missing or unreadable, or config_name
+    # may be unset; each of these means the scorecaster has to be trained.
+    except (AttributeError, OSError, TypeError, ValueError):
         train_model = True
     # Run the main loop
     # At time t, we observe y_t and make a prediction for y_{t+ahead}
-    # We also update the quantile at the next time-step, q[t+1], based on information up to and including t_pred = t - ahead + 1.
-    # lr_t = lr * (scores[:T_burnin].max() - scores[:T_burnin].min()) if proportional_lr and T_burnin > 0 else lr
+    # We also update the quantile at the next time-step, q[t+1],
+    # based on information up to and including t_pred = t - ahead + 1.
+    # lr_t = lr * (scores[:T_burnin].max() - scores[:T_burnin].min()) if
+    # proportional_lr and T_burnin > 0 else lr
     for t in tqdm(range(T_test)):
         t_lr = t
         t_lr_min = max(t_lr - T_burnin, 0)

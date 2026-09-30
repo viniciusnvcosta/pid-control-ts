@@ -1,6 +1,9 @@
+"""
+Quantile functions for weighted conformal prediction.
+"""
+
 import numpy as np
 from scipy.optimize import brentq
-import pdb
 
 
 # Quantile function
@@ -53,7 +56,9 @@ def weighted_conformal(args):
     scores = np.abs(Yhat_test - Y_test)
     qhats = np.array(
         [
-            get_weighted_quantile(scores[t - weights.shape[0] : t], weights, 1 - alpha)
+            standard_weighted_quantile(
+                scores[t - weights.shape[0] : t], wtildes, 1 - alpha
+            )
             for t in range(T_burnin, T_test)
         ]
     )

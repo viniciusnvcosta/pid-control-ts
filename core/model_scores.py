@@ -1,32 +1,30 @@
-import os, copy
-import numpy as np
-import torch
-import pandas as pd
+"""
+Generates forecasts from an ARIMA model
+"""
+
+import contextlib
+import copy
+import os
 import warnings
-from .ar import generate_process
-from darts.models.forecasting.prophet_model import Prophet
+
+import numpy as np
+import pandas as pd
+from darts import TimeSeries
 from darts.models.forecasting.arima import ARIMA
+from darts.models.forecasting.prophet_model import Prophet
 from darts.models.forecasting.theta import Theta
 from darts.models.forecasting.transformer_model import TransformerModel
-from darts import TimeSeries
-import pdb
-from tqdm import tqdm
-
-"""
-    Generates forecasts from an ARIMA model
-"""
 
 
 def generate_forecasts(
     data, model_name, savename, overwrite, log, fit_every, ahead, *args, **kwargs
 ):
     if not overwrite:
-        try:
+        # A missing or unreadable cache means the forecasts are regenerated.
+        with contextlib.suppress(OSError, KeyError, ValueError):
             saved = np.load(savename)
             forecasts = saved["forecasts"]
             return forecasts
-        except:
-            pass
     T = data.shape[0]
     forecasts = np.zeros((T,))
     data2 = copy.deepcopy(data)
@@ -52,10 +50,9 @@ def generate_forecasts(
         model = Theta()
     elif model_name == "transformer":
         model = TransformerModel(12, ahead, n_epochs=10)
-        os.system(
-            "export PYTORCH_ENABLE_MPS_FALLBACK=1"
-        )  # WARNING: This doesn't always work. If not, make sure to execute on your system to use the transformer architecture.
-        y = y.astype(np.float32)
+        os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
+        # WARNING: This doesn't always work. If not, make sure to execute on your system to use the transformer architecture.
+        y = y.astype("float32")
     else:
         raise ValueError("Invalid model name")
     # Ignore ConvergenceWarning

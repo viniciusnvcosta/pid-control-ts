@@ -4,7 +4,7 @@ Hierarchical reconciliation (state → US) before Conformal PID (Angelopoulos et
 Design: docs/superpowers/specs/2026-09-29-hierarchical-conformal-pid-design.md. Decisions: docs/protocol-decisions.md (overrides plans).
 
 ## Layout
-- `core/` — upstream conformal methods. Import, never reimplement. Changes only behind tests/unit/test_core_characterization.py.
+- `core/` — upstream conformal methods. Import, never reimplement. Changes only behind tests/unit/test_core_characterization.py and tests/unit/test_core_harness_contract.py; keep `Csat` and `*args, **kwargs` (the paper harness depends on them).
 - `src/hcp/` — flat package, one module per stage: data → reconcile → conformal → evaluate → stats → report, orchestrated by run.py. Modules 150–300 lines; split above ~400.
 - `configs/*.toml` — one file per experiment, loaded into a frozen dataclass. No Hydra.
 - `results/<run_id>/` — only run.py writes; never overwritten.

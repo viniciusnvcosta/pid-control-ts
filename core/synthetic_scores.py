@@ -1,10 +1,14 @@
-import numpy as np
-from .ar import generate_process
-import pdb
+"""
+Generates scores from a pre-defined set of categories.
+"""
 
-"""
-    Generates scores from a pre-defined set of categories.
-"""
+import numpy as np
+
+from .ar import generate_process
+
+
+class ScoreCategoryNotImplementedError(Exception):
+    """Raised when an unsupported score category is requested."""
 
 
 def generate_scores(category, *args, **kwargs):
@@ -20,7 +24,7 @@ def generate_scores(category, *args, **kwargs):
             + kwargs["start_point"]
         )
     else:
-        raise Exception("Score category not implemented!")
+        raise ScoreCategoryNotImplementedError("Score category not implemented!")
 
 
 def linear_scores(start_point, end_point, length, sigma, *args, **kwargs):

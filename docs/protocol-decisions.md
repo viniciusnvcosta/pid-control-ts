@@ -29,4 +29,10 @@
 | D16 | **Start-up caveat on the primary endpoint.** Controllers are re-initialised at `evaluation_start` (2021-01-16, winter-wave peak; 112 weeks); the rolling-coverage endpoint is dominated by the start-up transient (PI offsets jump then decay slowly), so the primary contrast reflects transient plus steady state. PI over-coverage (0.90–0.96 vs 0.80) is a property of the controller on a conservative base with 4-week feedback delay, not an adapter bug (wiring pinned by `test_pi_matches_paper_harness_wiring`). |
 | D17 | **Reporting clarifications.** Contrasts are computed only at `lr` (`lr_grid` results are descriptive metrics); contrasts at non-primary block lengths are Holm-adjusted inside the secondary family; with `block < rolling_window` the rolling/run metrics straddle block joins in resamples; MinT may produce negative lower quantiles on small leaves (US row unaffected); crossings are counted with relative tolerance 1e-9 and reported separately for the US row (amends D8's count). |
 
+## 2026-09-30
+
+| # | Decision |
+|---|---|
+| D18 | **Lint-only refactor of `core/` (amends D14's "only change").** `core/` is lint-clean under ruff 0.16.9's default rules. The changes are unused imports and `pdb` removed, module docstrings, `os.environ` instead of a no-op `os.system("export ...")`, and bare `except:` narrowed to the exact errors it used to swallow: `(AttributeError, OSError, TypeError, ValueError)` in the scorecaster cache load, `contextlib.suppress(OSError, KeyError, ValueError)` in `generate_forecasts`. The public calling convention is kept: `Csat` stays the keyword, and every method keeps `*args, **kwargs` so `tests/base_test.py`'s `fn(scores, alpha, lr, **config)` still works; `tests/unit/test_core_harness_contract.py` pins this. One bug fix is included: `weighted_conformal` called the undefined `get_weighted_quantile` (NameError on every call, no callers) and now calls `standard_weighted_quantile` with the normalized `wtildes`. The characterization goldens are unchanged, so every study result is numerically identical. |
+
 New decisions are appended with a date; old ones are never deleted. This file overrides plans.
