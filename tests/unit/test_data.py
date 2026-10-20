@@ -6,12 +6,24 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from hcp.data import file_sha256, load_hierarchy
+from hcp.data import (
+    FORECASTER,
+    TERRITORIES,
+    build_bundle,
+    build_bundles,
+    file_sha256,
+    load_hierarchy,
+    read_forecasts,
+)
 from tests.helpers import (
+    ALT_FORECASTER,
+    DUP_FORECASTER,
     GAP_LEAF,
     GAP_WEEK,
     LATE_WEEKS,
     N_WEEKS,
+    SHORT_FORECASTER,
+    SHORT_WEEKS,
     START,
     TRUTHLESS_US_WEEKS,
     synthetic_rows,
@@ -95,3 +107,51 @@ def test_duplicate_rows_raise(tmp_path: Path) -> None:
     pd.DataFrame(rows + rows[:1]).to_csv(path)
     with pytest.raises(ValueError, match="duplicate"):
         load_hierarchy(path)
+
+
+def _assert_same_bundle(a, b) -> None:
+    assert a.nodes == b.nodes
+    for name in ("dates", "forecast_dates", "y", "q", "imputed"):
+        np.testing.assert_array_equal(getattr(a, name), getattr(b, name))
+
+
+def test_load_hierarchy_equals_build_bundle_of_read_forecasts(hier_csv: Path) -> None:
+    _assert_same_bundle(
+        load_hierarchy(hier_csv), build_bundle(read_forecasts(hier_csv))
+    )
+
+
+def test_read_forecasts_keeps_only_ahead_4(hier_csv: Path) -> None:
+    assert set(read_forecasts(hier_csv)["ahead"]) == {4}
+
+
+def test_read_forecasts_checks_sha256(hier_csv: Path) -> None:
+    with pytest.raises(ValueError, match="sha256"):
+        read_forecasts(hier_csv, "0" * 64)
+
+
+def test_build_bundle_selects_forecaster(panel_frame) -> None:
+    base = build_bundle(panel_frame)
+    alt = build_bundle(panel_frame, ALT_FORECASTER)
+    np.testing.assert_array_equal(alt.dates, base.dates)
+    np.testing.assert_allclose(alt.q, 1.1 * base.q)
+    np.testing.assert_array_equal(alt.y, base.y)
+
+
+def test_build_bundle_unknown_forecaster_raises(panel_frame) -> None:
+    with pytest.raises(ValueError, match="no rows for forecaster 'nope'"):
+        build_bundle(panel_frame, "nope")
+
+
+def test_build_bundles_maps_every_forecaster_and_none_on_failure(panel_frame) -> None:
+    bundles = build_bundles(panel_frame)
+    assert list(bundles) == sorted(panel_frame["forecaster"].unique())
+    assert (
+        bundles[SHORT_FORECASTER] is None
+        or len(bundles[SHORT_FORECASTER].dates) <= SHORT_WEEKS
+    )
+    _assert_same_bundle(bundles[DUP_FORECASTER], bundles[FORECASTER])
+
+
+def test_territories_constant() -> None:
+    assert TERRITORIES == ("as", "gu", "mp", "pr", "vi")

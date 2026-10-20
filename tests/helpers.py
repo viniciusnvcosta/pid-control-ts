@@ -1,5 +1,5 @@
 # ABOUTME: Test helpers: a synthetic forecast CSV in the real deaths.csv schema, a TOML writer, real-data paths.
-# ABOUTME: The synthetic hierarchy is us + aa/bb/cc with a late leaf, a missing leaf week and truthless US weeks.
+# ABOUTME: The synthetic hierarchy is us + aa/bb/cc, plus panel forecasters ALT/DUP/SHORT for multi-forecaster fixtures.
 from pathlib import Path
 
 import numpy as np
@@ -59,6 +59,38 @@ def synthetic_rows(seed: int = 0) -> list[dict]:
             )
             rows.append({**row, "ahead": 1, **dict.fromkeys(QUANTILE_COLUMNS, -2.0)})
     return rows
+
+
+ALT_FORECASTER = "synth-alt"
+DUP_FORECASTER = "synth-dup"
+SHORT_FORECASTER = "synth-short"
+SHORT_WEEKS = 8
+
+
+def panel_rows(seed: int = 0) -> list[dict]:
+    """``synthetic_rows`` plus three panel forecasters.
+
+    ``ALT_FORECASTER`` has every quantile x 1.1, ``DUP_FORECASTER`` copies
+    ``FORECASTER`` exactly, and ``SHORT_FORECASTER`` has only the last
+    ``SHORT_WEEKS`` target weeks.
+    """
+    rows = synthetic_rows(seed)
+    cutoff = START + pd.Timedelta(weeks=N_WEEKS - SHORT_WEEKS)
+    extra = []
+    for row in rows:
+        if row["forecaster"] != FORECASTER or row["ahead"] != 4:
+            continue
+        extra.append(
+            {
+                **row,
+                "forecaster": ALT_FORECASTER,
+                **{c: row[c] * 1.1 for c in QUANTILE_COLUMNS},
+            }
+        )
+        extra.append({**row, "forecaster": DUP_FORECASTER})
+        if pd.Timestamp(row["target_end_date"]) >= cutoff:
+            extra.append({**row, "forecaster": SHORT_FORECASTER})
+    return rows + extra
 
 
 def _toml_value(value: object) -> str:
