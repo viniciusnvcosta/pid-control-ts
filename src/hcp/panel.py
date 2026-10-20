@@ -18,7 +18,7 @@ import numpy as np
 import pandas as pd
 
 from hcp.conformal import ControllerConfig, conformalize
-from hcp.data import TERRITORIES, HierarchyBundle
+from hcp.data import ROOT, TERRITORIES, HierarchyBundle
 
 # LEVELS, PANEL_METRICS, ForecasterArms and node_scale are re-exported here as part of
 # the panel API: tests and later tasks import them from hcp.panel.
@@ -116,6 +116,9 @@ def forecaster_arms(bundle: HierarchyBundle, cfg: PanelConfig) -> ForecasterArms
     window_y = bundle.y[:, t0:]
     scored = np.isfinite(window_y).all(axis=1)
     nodes = tuple(name for name, keep in zip(bundle.nodes, scored, strict=True) if keep)
+    # Level metrics and endpoint selection assume the first scored node is the US root.
+    if not nodes or nodes[0] != ROOT:
+        raise ValueError("the US root must be scored on the evaluation window")
     y = window_y[scored]
     endpoint = np.array(
         [i > 0 and name not in TERRITORIES for i, name in enumerate(nodes)]

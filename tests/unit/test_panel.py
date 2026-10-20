@@ -98,6 +98,15 @@ def test_forecaster_arms_drops_unscored_node_with_nan_truth(panel_frame) -> None
     assert arms.diagnostics["unscored_nodes"] == ["cc"]
 
 
+def test_forecaster_arms_rejects_unscored_us_root(panel_frame) -> None:
+    bundle = build_bundle(panel_frame, FORECASTER)
+    y = bundle.y.copy()
+    y[0, -1] = np.nan
+    bundle = replace(bundle, y=y)
+    with pytest.raises(ValueError, match="root"):
+        forecaster_arms(bundle, ARMS_SMALL)
+
+
 def test_raw_none_intervals_equal_base_quantiles(panel_frame) -> None:
     from hcp.reconcile import evaluation_start
 
