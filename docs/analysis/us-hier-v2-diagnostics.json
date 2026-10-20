@@ -1,0 +1,87 @@
+{
+  "run_id": "us-hier-v2",
+  "n_weeks": 112,
+  "evaluation_start": "2021-01-16",
+  "floor": {
+    "n_sim": 10000,
+    "mean": 0.0968852427184466,
+    "p2.5": 0.06310679611650484,
+    "p97.5": 0.1378640776699029
+  },
+  "location_scale": {
+    "none": {
+      "coverage_deviation": 0.15145631067961152,
+      "longest_miss_run": 4.0,
+      "marginal_coverage": 0.8839285714285714,
+      "mean_width": 4838.857142857143,
+      "median_width": 4258.5,
+      "interval_score": 6023.857142857143,
+      "median_mae": 1319.9464285714287
+    },
+    "bottom_up": {
+      "coverage_deviation": 0.1592233009708736,
+      "longest_miss_run": 2.0,
+      "marginal_coverage": 0.9464285714285714,
+      "mean_width": 6805.607142857143,
+      "median_width": 5845.0,
+      "interval_score": 7325.428571428572,
+      "median_mae": 1287.642857142857
+    },
+    "mint_shrink": {
+      "coverage_deviation": 0.1543689320388348,
+      "longest_miss_run": 2.0,
+      "marginal_coverage": 0.9375,
+      "mean_width": 5993.84038550221,
+      "median_width": 4994.935077233466,
+      "interval_score": 6662.586174873722,
+      "median_mae": 1299.8775452287866
+    },
+    "mint_median": {
+      "coverage_deviation": 0.18349514563106784,
+      "longest_miss_run": 8.0,
+      "marginal_coverage": 0.8482142857142857,
+      "mean_width": 4838.857142857143,
+      "median_width": 4258.5,
+      "interval_score": 6251.589241825165,
+      "median_mae": 1299.8775452287866
+    }
+  },
+  "warm_start": {
+    "none": {
+      "cold": {
+        "coverage_deviation": 0.15048543689320373,
+        "longest_miss_run": 2.0,
+        "marginal_coverage": 0.9464285714285714,
+        "mean_width": 6977.544225778865,
+        "median_width": 6537.598749431048,
+        "interval_score": 7573.326109626372
+      },
+      "warm": {
+        "coverage_deviation": 0.15145631067961152,
+        "longest_miss_run": 3.0,
+        "marginal_coverage": 0.9107142857142857,
+        "mean_width": 6543.717401649381,
+        "median_width": 5712.071828555729,
+        "interval_score": 7173.016033183876
+      }
+    },
+    "bottom_up": {
+      "cold": {
+        "coverage_deviation": 0.1689320388349513,
+        "longest_miss_run": 1.0,
+        "marginal_coverage": 0.9642857142857143,
+        "mean_width": 7687.8913471144615,
+        "median_width": 6400.78998592067,
+        "interval_score": 7855.580864927656
+      },
+      "warm": {
+        "coverage_deviation": 0.15339805825242703,
+        "longest_miss_run": 3.0,
+        "marginal_coverage": 0.9107142857142857,
+        "mean_width": 7067.632112518971,
+        "median_width": 5388.918193322076,
+        "interval_score": 7459.550547563248
+      }
+    }
+  }
+}
