@@ -4,9 +4,14 @@
 
 Usage: ``uv run python -m hcp.run configs/us_hier.toml``.
 
-Every arm (reconciler x controller x lr) starts at the common evaluation week given by
-the MinT warm-up (D7), so all arms are scored on the same weeks. Contrasts use one set
-of moving-block resamples per block length, shared by every arm (paired, D12).
+Two designs share this orchestrator. ``design = "us"`` (Phase 1) runs every arm
+(reconciler x controller x lr) on the single US series, starting at the common
+evaluation week given by the MinT warm-up (D7). ``design = "panel"`` (Phase 2) runs
+the leaves x forecasters panel (D20-D26): it reads every forecaster, checks D21
+eligibility, and runs the panel reconcilers (``none``, ``bottom_up``, ``mint_shrink``,
+``mint_median``) and controllers (``raw``, ``pi``; ``pid_theta`` is rejected, D22) on
+each eligible forecaster's own evaluation window. Contrasts use one set of
+moving-block resamples per block length, shared by every arm (paired, D12).
 """
 
 import argparse
@@ -23,10 +28,20 @@ import pandas as pd
 import statsmodels
 
 from hcp.conformal import CONTROLLERS, ControllerConfig, conformalize
-from hcp.data import HierarchyBundle, file_sha256, load_hierarchy
+from hcp.data import (
+    FORECASTER,
+    HierarchyBundle,
+    build_bundles,
+    file_sha256,
+    load_hierarchy,
+    read_forecasts,
+)
+from hcp.eligibility import EligibilityRule, eligibility, require_eligible
 from hcp.evaluate import METRIC_NAMES, evaluate
+from hcp.panel import PRIMARY as PANEL_PRIMARY
+from hcp.panel import PanelConfig, PanelResult, run_panel
 from hcp.reconcile import RECONCILERS, evaluation_start, reconcile_bundle
-from hcp.report import RAW_LR, render_figures
+from hcp.report import RAW_LR, render_figures, render_panel_figures
 from hcp.stats import draw_blocks, holm, summarize_diff
 
 PRIMARY = {
@@ -60,6 +75,11 @@ class RunConfig:
     rolling_window: int = 10
     blocks: tuple[int, ...] = (8, 4, 12)
     n_boot: int = 2000
+    design: str = "us"
+    forecasters: tuple[str, ...] = (FORECASTER,)
+    min_eval_weeks: int = 60
+    max_leaf_imputed: float = 0.05
+    duplicate_share: float = 0.95
 
     def __post_init__(self) -> None:
         if not self.run_id or Path(self.run_id).name != self.run_id:
@@ -70,10 +90,24 @@ class RunConfig:
             or self.root_seed < 0
         ):
             raise ValueError("root_seed must be a non-negative integer")
-        for name in ("lr_grid", "reconcilers", "controllers", "blocks"):
+        for name in ("lr_grid", "reconcilers", "controllers", "blocks", "forecasters"):
             object.__setattr__(self, name, tuple(getattr(self, name)))
         for name in ("data_path", "output_dir"):
             object.__setattr__(self, name, Path(getattr(self, name)).expanduser())
+        if self.design not in ("us", "panel"):
+            raise ValueError(f"design must be 'us' or 'panel', got {self.design!r}")
+        if self.design == "us":
+            if self.forecasters != (FORECASTER,):
+                raise ValueError("design 'us' requires forecasters == (FORECASTER,)")
+        else:
+            if "pid_theta" in self.controllers:
+                raise ValueError("pid_theta is rejected for design 'panel' (D22)")
+            if FORECASTER not in self.forecasters:
+                raise ValueError(
+                    f"forecasters must include the primary forecaster {FORECASTER!r}"
+                )
+            if len(set(self.forecasters)) != len(self.forecasters):
+                raise ValueError("forecasters must not contain duplicates")
         if "none" not in self.reconcilers:
             raise ValueError("reconcilers must include the 'none' control")
         if unknown := set(self.reconcilers) - set(RECONCILERS):
@@ -120,6 +154,22 @@ def _controller_config(cfg: RunConfig, lr: float) -> ControllerConfig:
         KI=cfg.KI,
         T_burnin=cfg.T_burnin,
         ahead=cfg.ahead,
+    )
+
+
+def panel_config(cfg: RunConfig) -> PanelConfig:
+    """Map a panel ``RunConfig`` onto the ``PanelConfig`` consumed by ``run_panel``."""
+    return PanelConfig(
+        controller=_controller_config(cfg, cfg.lr),
+        lr_grid=cfg.lr_grid,
+        reconcilers=cfg.reconcilers,
+        controllers=cfg.controllers,
+        mint_warmup=cfg.mint_warmup,
+        rolling_window=cfg.rolling_window,
+        blocks=cfg.blocks,
+        n_boot=cfg.n_boot,
+        root_seed=cfg.root_seed,
+        primary_forecaster=FORECASTER,
     )
 
 
@@ -274,6 +324,33 @@ def _git(*args: str) -> str:
     return completed.stdout.strip()
 
 
+def _manifest(
+    cfg: RunConfig,
+    input_sha256: str,
+    *,
+    primary: dict,
+    seed: dict,
+    diagnostics: dict,
+) -> dict:
+    """Build the manifest dict shared by both designs; callers add their own keys."""
+    return {
+        "config": asdict(cfg),
+        "git_sha": _git("rev-parse", "HEAD"),
+        "git_dirty": bool(_git("status", "--porcelain")),
+        "timestamp_utc": datetime.now(UTC).isoformat(),
+        "input_sha256": input_sha256,
+        "seed": seed,
+        "versions": {
+            "python": platform.python_version(),
+            "numpy": np.__version__,
+            "pandas": pd.__version__,
+            "statsmodels": statsmodels.__version__,
+        },
+        "primary": primary,
+        "diagnostics": diagnostics,
+    }
+
+
 def write_artifacts(
     cfg: RunConfig, result: ExperimentResult, input_sha256: str
 ) -> Path:
@@ -296,22 +373,57 @@ def write_artifacts(
         lr=cfg.lr,
         block=cfg.blocks[0],
     )
-    manifest = {
-        "config": asdict(cfg),
-        "git_sha": _git("rev-parse", "HEAD"),
-        "git_dirty": bool(_git("status", "--porcelain")),
-        "timestamp_utc": datetime.now(UTC).isoformat(),
-        "input_sha256": input_sha256,
-        "seed": {"root_seed": cfg.root_seed, "block_children": len(cfg.blocks)},
-        "versions": {
-            "python": platform.python_version(),
-            "numpy": np.__version__,
-            "pandas": pd.__version__,
-            "statsmodels": statsmodels.__version__,
+    manifest = _manifest(
+        cfg,
+        input_sha256,
+        primary=PRIMARY,
+        seed={"root_seed": cfg.root_seed, "block_children": len(cfg.blocks)},
+        diagnostics=result.diagnostics,
+    )
+    (out / "manifest.json").write_text(json.dumps(manifest, indent=2, default=str))
+    return out
+
+
+def write_panel_artifacts(
+    cfg: RunConfig,
+    result: PanelResult,
+    eligibility_table: pd.DataFrame,
+    input_sha256: str,
+) -> Path:
+    """Write panel tables, figures, eligibility and the manifest to ``output_dir / run_id``.
+
+    Raises:
+        FileExistsError: If the run directory already exists.
+    """
+    out = cfg.output_dir / cfg.run_id
+    out.mkdir(parents=True, exist_ok=False)
+    result.intervals.to_parquet(out / "intervals.parquet", index=False)
+    result.metrics.to_parquet(out / "metrics.parquet", index=False)
+    result.level_metrics.to_parquet(out / "level_metrics.parquet", index=False)
+    result.contrasts.to_parquet(out / "contrasts.parquet", index=False)
+    result.summary.to_parquet(out / "summary.parquet", index=False)
+    eligibility_table.to_parquet(out / "eligibility.parquet", index=False)
+    render_panel_figures(
+        result.metrics,
+        result.contrasts,
+        out / "figures",
+        lr=cfg.lr,
+        block=cfg.blocks[0],
+        primary_forecaster=FORECASTER,
+    )
+    manifest = _manifest(
+        cfg,
+        input_sha256,
+        primary={"forecaster": FORECASTER, **PANEL_PRIMARY},
+        seed={
+            "root_seed": cfg.root_seed,
+            "forecaster_children": len(cfg.forecasters) + 1,
+            "block_children": len(cfg.blocks),
         },
-        "primary": PRIMARY,
-        "diagnostics": result.diagnostics,
-    }
+        diagnostics=result.diagnostics,
+    )
+    manifest["forecasters"] = list(cfg.forecasters)
+    manifest["eligibility"] = eligibility_table.to_dict(orient="records")
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2, default=str))
     return out
 
@@ -327,9 +439,27 @@ def main(argv: list[str] | None = None) -> int:
         raise FileExistsError(
             f"{cfg.output_dir / cfg.run_id} exists; choose a new run_id"
         )
-    bundle = load_hierarchy(cfg.data_path, cfg.expected_sha256)
-    result = run_experiment(cfg, bundle)
-    out = write_artifacts(cfg, result, file_sha256(cfg.data_path))
+    if cfg.design == "panel":
+        frame = read_forecasts(cfg.data_path, cfg.expected_sha256)
+        candidates = build_bundles(frame)
+        if candidates[FORECASTER] is None:
+            raise ValueError(f"forecaster {FORECASTER!r} has no usable bundle")
+        rule = EligibilityRule(
+            nodes=candidates[FORECASTER].nodes,
+            mint_warmup=cfg.mint_warmup,
+            min_eval_weeks=cfg.min_eval_weeks,
+            max_leaf_imputed=cfg.max_leaf_imputed,
+            duplicate_share=cfg.duplicate_share,
+        )
+        table = eligibility(candidates, rule)
+        require_eligible(table, cfg.forecasters)
+        bundles = {name: candidates[name] for name in cfg.forecasters}
+        result = run_panel(bundles, panel_config(cfg))
+        out = write_panel_artifacts(cfg, result, table, file_sha256(cfg.data_path))
+    else:
+        bundle = load_hierarchy(cfg.data_path, cfg.expected_sha256)
+        result = run_experiment(cfg, bundle)
+        out = write_artifacts(cfg, result, file_sha256(cfg.data_path))
     print(f"Artifacts: {out}")
     return 0
 
