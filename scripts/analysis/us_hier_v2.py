@@ -18,12 +18,12 @@ import pandas as pd
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
 
+from hcp.config import RunConfig, controller_config
 from hcp.conformal import conformalize
 from hcp.data import HierarchyBundle, load_hierarchy
 from hcp.evaluate import coverage_deviation_floor, evaluate
 from hcp.reconcile import evaluation_start, reconcile_bundle
 from hcp.report import RAW_LR, RECONCILER_COLORS
-from hcp.run import RunConfig, _controller_config
 
 LOCATION_SCALE = ("none", "bottom_up", "mint_shrink", "mint_median")
 WARM_START = ("none", "bottom_up")
@@ -49,9 +49,9 @@ def _pi_starts(
     q_us = reconcile_bundle(bundle, reconciler, cfg.mint_warmup).q[0]
     y = bundle.y[0]
     window = (y[t0:], q_us[t0:, 0], q_us[t0:, 2])
-    cold = conformalize(*window, "pi", _controller_config(cfg, cfg.lr))
+    cold = conformalize(*window, "pi", controller_config(cfg, cfg.lr))
     lo, hi = conformalize(
-        y, q_us[:, 0], q_us[:, 2], "pi", _controller_config(cfg, cfg.lr)
+        y, q_us[:, 0], q_us[:, 2], "pi", controller_config(cfg, cfg.lr)
     )
     return {"cold": (*window, *cold), "warm": (*window, lo[t0:], hi[t0:])}
 
