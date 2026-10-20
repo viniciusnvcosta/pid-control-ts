@@ -314,6 +314,7 @@ def write_panel_artifacts(
         diagnostics=result.diagnostics,
     )
     manifest["forecasters"] = list(cfg.forecasters)
+    manifest["summary_note"] = "descriptive only (D24)"
     manifest["eligibility"] = eligibility_table.to_dict(orient="records")
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2, default=str))
     return out

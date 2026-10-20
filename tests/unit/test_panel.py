@@ -71,6 +71,16 @@ def test_forecaster_arms_nodes_and_endpoint(panel_frame) -> None:
     np.testing.assert_array_equal(arms.endpoint, [False, True, True, True])
 
 
+def test_forecaster_arms_diagnostics_record_evaluation_end_and_endpoint_count(
+    panel_frame,
+) -> None:
+    bundle = build_bundle(panel_frame, FORECASTER)
+    arms = forecaster_arms(bundle, ARMS_SMALL)
+    assert arms.diagnostics["evaluation_end"] == "2021-07-10"
+    assert arms.diagnostics["n_endpoint"] == 3
+    assert isinstance(arms.diagnostics["n_endpoint"], int)
+
+
 def test_forecaster_arms_endpoint_excludes_territories(panel_frame) -> None:
     bundle = build_bundle(panel_frame, FORECASTER)
     bundle = replace(bundle, nodes=("us", "aa", "bb", "pr"))

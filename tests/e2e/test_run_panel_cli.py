@@ -62,6 +62,11 @@ def test_panel_cli_writes_every_artifact(tmp_path: Path, panel_csv: Path) -> Non
     manifest = json.loads((out / "manifest.json").read_text())
     assert manifest["config"]["design"] == "panel"
     assert manifest["forecasters"] == [FORECASTER, ALT_FORECASTER]
+    assert manifest["summary_note"] == "descriptive only (D24)"
+    for forecaster in (FORECASTER, ALT_FORECASTER):
+        diagnostics = manifest["diagnostics"][forecaster]
+        assert diagnostics["evaluation_end"] == "2021-07-10"
+        assert diagnostics["n_endpoint"] == 2
     dup_row = next(
         row for row in manifest["eligibility"] if row["forecaster"] == DUP_FORECASTER
     )

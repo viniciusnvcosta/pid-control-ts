@@ -148,6 +148,8 @@ def forecaster_arms(bundle: HierarchyBundle, cfg: PanelConfig) -> ForecasterArms
     diagnostics = {
         "n_weeks": int(y.shape[1]),
         "evaluation_start": str(pd.Timestamp(bundle.dates[t0]).date()),
+        "evaluation_end": str(pd.Timestamp(bundle.dates[-1]).date()),
+        "n_endpoint": int(endpoint.sum()),
         "imputed_cells": int(bundle.imputed.sum()),
         "leaf_imputed_share": float(bundle.imputed[1:].mean()),
         "unscored_nodes": [
