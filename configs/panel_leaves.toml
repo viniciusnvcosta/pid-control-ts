@@ -1,0 +1,25 @@
+# Pre-registered Phase 2 panel run (docs/protocol-decisions.md D20-D27).
+# Run from the project root: `uv run python -m hcp.run configs/panel_leaves.toml`.
+run_id = "panel-leaves-v1"
+root_seed = 20261020
+data_path = "data/deaths.csv"
+expected_sha256 = "cb4dccfd21d6c08b1247aa9a7c6a8d93f7c373871526cfcb4860df884b54ac06"
+output_dir = "results"
+design = "panel"
+forecasters = ["COVIDhub-4_week_ensemble", "CEID-Walk", "COVIDhub-baseline", "COVIDhub-ensemble", "COVIDhub-trained_ensemble", "JHUAPL-Bucky", "RobertWalraven-ESG", "UMass-MechBayes"]
+alpha = 0.2
+lr = 0.1
+lr_grid = [1.0, 0.5, 0.1, 0.05]
+Csat = 2.0
+KI = 1000.0
+T_burnin = 5
+ahead = 4
+reconcilers = ["none", "bottom_up", "mint_shrink", "mint_median"]
+controllers = ["raw", "pi"]
+mint_warmup = 20
+rolling_window = 10
+blocks = [8, 4, 12]
+n_boot = 2000
+min_eval_weeks = 60
+max_leaf_imputed = 0.05
+duplicate_share = 0.95

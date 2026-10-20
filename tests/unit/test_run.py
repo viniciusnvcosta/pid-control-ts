@@ -16,7 +16,7 @@ from hcp.run import (
     panel_config,
     run_experiment,
 )
-from tests.helpers import write_config
+from tests.helpers import D21_ELIGIBLE, ROOT_DIR, write_config
 
 BASE = {
     "run_id": "unit",
@@ -144,6 +144,13 @@ def test_panel_config_maps_fields() -> None:
     assert panel_cfg.n_boot == cfg.n_boot
     assert panel_cfg.root_seed == cfg.root_seed
     assert panel_cfg.primary_forecaster == FORECASTER
+
+
+def test_panel_leaves_config_is_the_preregistered_run() -> None:
+    cfg = load_config(ROOT_DIR / "configs" / "panel_leaves.toml")
+    assert cfg.design == "panel"
+    assert sorted(cfg.forecasters) == D21_ELIGIBLE
+    assert cfg.forecasters[0] == FORECASTER
 
 
 def test_us_design_manifest_keys_unchanged() -> None:

@@ -13,6 +13,17 @@ REAL_SHA256 = "cb4dccfd21d6c08b1247aa9a7c6a8d93f7c373871526cfcb4860df884b54ac06"
 PICKLES = ROOT_DIR / "tests" / "datasets" / "covid-ts-proc" / "statewide"
 PICKLE_STATES = ("ak", "ca", "fl", "ga", "ks", "ny", "tx")
 
+D21_ELIGIBLE = [
+    "CEID-Walk",
+    "COVIDhub-4_week_ensemble",
+    "COVIDhub-baseline",
+    "COVIDhub-ensemble",
+    "COVIDhub-trained_ensemble",
+    "JHUAPL-Bucky",
+    "RobertWalraven-ESG",
+    "UMass-MechBayes",
+]
+
 START = pd.Timestamp("2021-01-02")
 N_WEEKS = 30
 LEAVES = ("aa", "bb", "cc")
