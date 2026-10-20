@@ -281,23 +281,26 @@ def write_panel_artifacts(
     eligibility_table: pd.DataFrame,
     input_sha256: str,
 ) -> Path:
-    """Write panel tables, figures, eligibility and the manifest to ``output_dir / run_id``.
+    """Stage panel artifacts, then publish them together at ``output_dir / run_id``.
 
     Raises:
         FileExistsError: If the run directory already exists.
     """
     out = cfg.output_dir / cfg.run_id
-    out.mkdir(parents=True, exist_ok=False)
-    result.intervals.to_parquet(out / "intervals.parquet", index=False)
-    result.metrics.to_parquet(out / "metrics.parquet", index=False)
-    result.level_metrics.to_parquet(out / "level_metrics.parquet", index=False)
-    result.contrasts.to_parquet(out / "contrasts.parquet", index=False)
-    result.summary.to_parquet(out / "summary.parquet", index=False)
-    eligibility_table.to_parquet(out / "eligibility.parquet", index=False)
+    if out.exists():
+        raise FileExistsError(f"{out} exists; choose a new run_id")
+    staging = out.with_name(f".{out.name}.partial")
+    staging.mkdir(parents=True, exist_ok=False)
+    result.intervals.to_parquet(staging / "intervals.parquet", index=False)
+    result.metrics.to_parquet(staging / "metrics.parquet", index=False)
+    result.level_metrics.to_parquet(staging / "level_metrics.parquet", index=False)
+    result.contrasts.to_parquet(staging / "contrasts.parquet", index=False)
+    result.summary.to_parquet(staging / "summary.parquet", index=False)
+    eligibility_table.to_parquet(staging / "eligibility.parquet", index=False)
     render_panel_figures(
         result.metrics,
         result.contrasts,
-        out / "figures",
+        staging / "figures",
         lr=cfg.lr,
         block=cfg.blocks[0],
         primary_forecaster=FORECASTER,
@@ -316,7 +319,10 @@ def write_panel_artifacts(
     manifest["forecasters"] = list(cfg.forecasters)
     manifest["summary_note"] = "descriptive only (D24)"
     manifest["eligibility"] = eligibility_table.to_dict(orient="records")
-    (out / "manifest.json").write_text(json.dumps(manifest, indent=2, default=str))
+    (staging / "manifest.json").write_text(json.dumps(manifest, indent=2, default=str))
+    if out.exists():
+        raise FileExistsError(f"{out} exists; choose a new run_id")
+    staging.rename(out)
     return out
 
 

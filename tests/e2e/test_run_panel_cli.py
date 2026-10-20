@@ -93,6 +93,35 @@ def test_panel_cli_refuses_to_overwrite_a_run(tmp_path: Path, panel_csv: Path) -
         main([str(config)])
 
 
+def test_panel_cli_does_not_publish_when_figure_rendering_fails(
+    tmp_path: Path, panel_csv: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path, panel_csv, (FORECASTER, ALT_FORECASTER))
+
+    def fail_render(*args, **kwargs) -> None:
+        raise RuntimeError("figure rendering failed")
+
+    monkeypatch.setattr("hcp.run.render_panel_figures", fail_render)
+    with pytest.raises(RuntimeError, match="figure rendering failed"):
+        main([str(config)])
+    assert not (tmp_path / "results" / "panel-e2e").exists()
+
+
+def test_panel_writer_refuses_final_directory_created_during_rendering(
+    tmp_path: Path, panel_csv: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path, panel_csv, (FORECASTER, ALT_FORECASTER))
+    out = tmp_path / "results" / "panel-e2e"
+
+    def create_final_directory(*args, **kwargs) -> None:
+        out.mkdir()
+
+    monkeypatch.setattr("hcp.run.render_panel_figures", create_final_directory)
+    with pytest.raises(FileExistsError):
+        main([str(config)])
+    assert list(out.iterdir()) == []
+
+
 def test_panel_cli_raises_value_error_when_primary_forecaster_has_no_rows(
     tmp_path: Path,
 ) -> None:
