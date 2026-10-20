@@ -1,14 +1,16 @@
 # ABOUTME: Integration tests reproducing the D21 eligibility table and the D27 panel
 # ABOUTME: regression anchor against Phase 1's us-hier-v2 metrics, on the real deaths.csv.
+from dataclasses import replace
+
 import numpy as np
 import pandas as pd
 import pytest
 
-from hcp.conformal import ControllerConfig
 from hcp.data import FORECASTER, build_bundle, build_bundles, read_forecasts
 from hcp.eligibility import EligibilityRule, eligibility
 from hcp.evaluate import METRIC_NAMES
-from hcp.panel import PanelConfig, run_panel
+from hcp.panel import run_panel
+from hcp.run import load_config, panel_config
 from tests.helpers import D21_ELIGIBLE, REAL_DATA, REAL_SHA256, ROOT_DIR
 
 pytestmark = [
@@ -16,6 +18,7 @@ pytestmark = [
     pytest.mark.skipif(not REAL_DATA.exists(), reason="data/deaths.csv not downloaded"),
 ]
 
+# Frozen Phase 1 artifact against which the D27 anchor compares US metrics.
 V2_METRICS = ROOT_DIR / "results" / "us-hier-v2" / "metrics.parquet"
 
 
@@ -33,17 +36,11 @@ def test_eligibility_reproduces_d21() -> None:
 @pytest.mark.skipif(not V2_METRICS.exists(), reason="results/us-hier-v2 not run")
 def test_panel_us_node_reproduces_v2_metrics() -> None:
     bundle = build_bundle(read_forecasts(REAL_DATA, REAL_SHA256))
-    cfg = PanelConfig(
-        controller=ControllerConfig(),
-        lr_grid=(1.0, 0.5, 0.1, 0.05),
+    cfg = replace(
+        panel_config(load_config(ROOT_DIR / "configs/panel_leaves.toml")),
         reconcilers=("none", "bottom_up", "mint_shrink"),
-        controllers=("raw", "pi"),
-        mint_warmup=20,
-        rolling_window=10,
         blocks=(8,),
         n_boot=10,
-        root_seed=1,
-        primary_forecaster=FORECASTER,
     )
     result = run_panel({FORECASTER: bundle}, cfg)
     us_metrics = result.metrics[result.metrics["node"] == "us"]
