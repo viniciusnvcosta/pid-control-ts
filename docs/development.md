@@ -9,8 +9,8 @@ sha256sum data/deaths.csv   # cb4dccfd21d6c08b1247aa9a7c6a8d93f7c373871526cfcb48
 
 ## Checks
 ```bash
-uv run ruff check src tests/unit tests/integration tests/e2e tests/helpers.py tests/conftest.py
-uv run ruff format --check src tests/unit tests/integration tests/e2e tests/helpers.py tests/conftest.py
+uv run ruff check src scripts tests/unit tests/integration tests/e2e tests/helpers.py tests/conftest.py
+uv run ruff format --check src scripts tests/unit tests/integration tests/e2e tests/helpers.py tests/conftest.py
 uv run pytest                        # unit + e2e (synthetic data)
 uv run pytest -m integration         # real data parity and sanity (needs data/deaths.csv)
 uv run pytest -o addopts='' -q       # everything
