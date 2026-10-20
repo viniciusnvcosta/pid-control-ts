@@ -148,6 +148,7 @@ def warm_start_figure(
         (lower, r"Lower offset $q_{0.1} - lo$"),
         (upper, r"Upper offset $hi - q_{0.9}$"),
     ):
+        # Matches hcp.report's "none" color: gray by design.
         axes.axhline(0, color="#6b7280", linewidth=1)
         axes.set_ylabel(label, fontsize=8)
         axes.spines[["top", "right"]].set_visible(False)

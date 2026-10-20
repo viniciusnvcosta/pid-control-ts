@@ -6,6 +6,10 @@ Rows are the root ``us`` followed by the leaves in alphabetical order. The week 
 the set of target weeks where the US forecast and truth are complete. Leading weeks in
 which some leaf has never been forecast are trimmed, and later leaf gaps are filled by
 last observation carried forward (LOCF) and flagged in ``imputed``.
+
+``read_forecasts`` reads the CSV once into a shared frame. ``build_bundle`` selects
+one forecaster from that frame; ``build_bundles`` reuses it to build one bundle per
+forecaster, recording ``None`` when no usable bundle can be built.
 """
 
 import hashlib
