@@ -8,7 +8,7 @@ import pytest
 
 from hcp.data import FORECASTER, file_sha256
 from hcp.run import main
-from tests.helpers import ALT_FORECASTER, DUP_FORECASTER, write_config
+from tests.helpers import ALT_FORECASTER, DUP_FORECASTER, panel_rows, write_config
 
 
 def _config(tmp_path: Path, csv: Path, forecasters: tuple[str, ...]) -> Path:
@@ -85,4 +85,18 @@ def test_panel_cli_refuses_to_overwrite_a_run(tmp_path: Path, panel_csv: Path) -
     config = _config(tmp_path, panel_csv, (FORECASTER, ALT_FORECASTER))
     assert main([str(config)]) == 0
     with pytest.raises(FileExistsError):
+        main([str(config)])
+
+
+def test_panel_cli_raises_value_error_when_primary_forecaster_has_no_rows(
+    tmp_path: Path,
+) -> None:
+    # No bundle can be built for FORECASTER when the CSV has zero rows for it at
+    # all (as opposed to rows that fail to build a bundle, which build_bundles
+    # still maps to None); main must still raise ValueError, not KeyError.
+    rows = [row for row in panel_rows() if row["forecaster"] != FORECASTER]
+    csv = tmp_path / "panel-no-primary.csv"
+    pd.DataFrame(rows).to_csv(csv)  # index column mimics the real leading ""
+    config = _config(tmp_path, csv, (FORECASTER, ALT_FORECASTER))
+    with pytest.raises(ValueError, match="has no usable bundle"):
         main([str(config)])

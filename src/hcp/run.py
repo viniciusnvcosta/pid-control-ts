@@ -333,7 +333,7 @@ def main(argv: list[str] | None = None) -> int:
     if cfg.design == "panel":
         frame = read_forecasts(cfg.data_path, cfg.expected_sha256)
         candidates = build_bundles(frame)
-        if candidates[FORECASTER] is None:
+        if candidates.get(FORECASTER) is None:
             raise ValueError(f"forecaster {FORECASTER!r} has no usable bundle")
         rule = EligibilityRule(
             nodes=candidates[FORECASTER].nodes,
