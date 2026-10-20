@@ -15,7 +15,10 @@ moving-block resamples per block length, shared by every arm (paired, D12).
 """
 
 import argparse
+import ctypes
+import errno
 import json
+import os
 import platform
 import subprocess
 from dataclasses import asdict, dataclass
@@ -275,6 +278,33 @@ def write_artifacts(
     return out
 
 
+def _rename_noreplace(staging: Path, out: Path) -> None:
+    """Atomically publish a directory, refusing replacement or unsupported platforms."""
+    system = platform.system()
+    if system == "Windows":
+        staging.rename(out)  # Windows rename already refuses an existing destination.
+        return
+    rename = (
+        getattr(ctypes.CDLL(None, use_errno=True), "renameat2", None)
+        if system == "Linux"
+        else None
+    )
+    if rename is None:
+        raise OSError(errno.ENOTSUP, "atomic no-replace rename unavailable", str(out))
+    rename.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    rename.restype = ctypes.c_int
+    # AT_FDCWD = -100; RENAME_NOREPLACE = 1 forbids replacing even an empty directory.
+    if rename(-100, os.fsencode(staging), -100, os.fsencode(out), 1):
+        code = ctypes.get_errno()
+        raise OSError(code, os.strerror(code), str(out))
+
+
 def write_panel_artifacts(
     cfg: RunConfig,
     result: PanelResult,
@@ -285,6 +315,7 @@ def write_panel_artifacts(
 
     Raises:
         FileExistsError: If the run directory already exists.
+        OSError: If atomic no-replace publication is unavailable or fails.
     """
     out = cfg.output_dir / cfg.run_id
     if out.exists():
@@ -322,7 +353,7 @@ def write_panel_artifacts(
     (staging / "manifest.json").write_text(json.dumps(manifest, indent=2, default=str))
     if out.exists():
         raise FileExistsError(f"{out} exists; choose a new run_id")
-    staging.rename(out)
+    _rename_noreplace(staging, out)
     return out
 
 

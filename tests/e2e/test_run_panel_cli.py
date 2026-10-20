@@ -1,5 +1,6 @@
 # ABOUTME: End-to-end test of the CLI panel design on the synthetic panel hierarchy.
 # ABOUTME: Verifies every panel artifact, manifest fields, eligibility, and the no-overwrite rule.
+import errno
 import json
 from pathlib import Path
 
@@ -120,6 +121,39 @@ def test_panel_writer_refuses_final_directory_created_during_rendering(
     with pytest.raises(FileExistsError):
         main([str(config)])
     assert list(out.iterdir()) == []
+
+
+def test_panel_writer_refuses_destination_appearing_after_final_check(
+    tmp_path: Path, panel_csv: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path, panel_csv, (FORECASTER, ALT_FORECASTER))
+    out = tmp_path / "results" / "panel-e2e"
+    staging = out.with_name(f".{out.name}.partial")
+    exists = Path.exists
+
+    def create_after_final_check(path: Path) -> bool:
+        found = exists(path)
+        if path == out and not found and exists(staging / "manifest.json"):
+            # Simulate a competitor after the check, before the actual rename.
+            out.mkdir()
+        return found
+
+    monkeypatch.setattr(Path, "exists", create_after_final_check)
+    with pytest.raises(FileExistsError):
+        main([str(config)])
+    assert list(out.iterdir()) == []
+    assert (staging / "manifest.json").is_file()
+
+
+def test_panel_writer_fails_closed_without_atomic_no_replace_support(
+    tmp_path: Path, panel_csv: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path, panel_csv, (FORECASTER, ALT_FORECASTER))
+    monkeypatch.setattr("hcp.run.platform.system", lambda: "unsupported")
+    with pytest.raises(OSError) as error:
+        main([str(config)])
+    assert error.value.errno == errno.ENOTSUP
+    assert not (tmp_path / "results" / "panel-e2e").exists()
 
 
 def test_panel_cli_raises_value_error_when_primary_forecaster_has_no_rows(
