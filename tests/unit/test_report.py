@@ -4,6 +4,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from hcp.report import (
     leaf_contrast_figure,
@@ -176,3 +177,18 @@ def test_panel_forest_figure_bolds_primary_forecaster() -> None:
         if label.get_fontweight() in ("bold", 700)
     }
     assert bold == {"fc_primary"}
+
+
+@pytest.mark.parametrize("estimate", [-0.08, 0.04])
+def test_panel_forest_figure_renders_when_ci_excludes_estimate(estimate: float) -> None:
+    contrasts = _panel_contrasts().iloc[:1].assign(estimate=estimate)
+    figure = panel_forest_figure(
+        contrasts,
+        level="leaf_mean",
+        controller="raw",
+        lr=0.0,
+        block=8,
+        primary_forecaster="fc_primary",
+    )
+    figure.canvas.draw()
+    assert figure.axes[0].lines[0].get_xdata()[0] == estimate

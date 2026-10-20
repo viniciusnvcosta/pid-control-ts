@@ -4,6 +4,7 @@
 
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
@@ -189,12 +190,13 @@ def panel_forest_figure(
             if point.empty:
                 continue
             record = point.iloc[0]
+            # Percentile CIs can exclude the estimate; matplotlib requires nonnegative xerr.
             axes.errorbar(
                 [record["estimate"]],
                 [row],
                 xerr=[
-                    [record["estimate"] - record["low"]],
-                    [record["high"] - record["estimate"]],
+                    [np.maximum(record["estimate"] - record["low"], 0.0)],
+                    [np.maximum(record["high"] - record["estimate"], 0.0)],
                 ],
                 fmt="o",
                 color=RECONCILER_COLORS[treatment],
