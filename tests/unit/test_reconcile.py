@@ -32,7 +32,7 @@ def _truncate(bundle, k: int):
 
 
 def test_registry_names() -> None:
-    assert set(RECONCILERS) == {"none", "bottom_up", "mint_shrink"}
+    assert set(RECONCILERS) == {"none", "bottom_up", "mint_shrink", "mint_median"}
 
 
 def test_summing_matrix_is_ones_over_identity() -> None:
@@ -85,6 +85,52 @@ def test_unknown_method_raises() -> None:
 def test_mint_without_covariance_raises() -> None:
     with pytest.raises(ValueError, match="covariance"):
         reconcile(np.zeros((4, 3)), summing_matrix(3), "mint_shrink")
+
+
+def _spd(n: int, rng: np.random.Generator) -> np.ndarray:
+    a = rng.normal(size=(n, n))
+    return a @ a.T + n * np.eye(n)
+
+
+@pytest.mark.parametrize("seed", range(5))
+def test_mint_median_medians_are_coherent_and_spreads_kept(seed: int) -> None:
+    rng = np.random.default_rng(seed)
+    S = summing_matrix(4)
+    median = rng.uniform(10, 100, size=5)
+    base = np.stack(
+        [median - rng.uniform(1, 5, 5), median, median + rng.uniform(1, 5, 5)], axis=1
+    )
+    W = _spd(5, rng)
+    out = reconcile(base, S, "mint_median", covariance=W)
+    np.testing.assert_allclose(S @ out[1:, 1], out[:, 1])
+    np.testing.assert_allclose(out - out[:, [1]], base - base[:, [1]])
+    np.testing.assert_allclose(
+        out[:, 1], reconcile(base, S, "mint_shrink", covariance=W)[:, 1]
+    )
+
+
+def test_mint_median_without_covariance_raises() -> None:
+    with pytest.raises(ValueError, match="covariance"):
+        reconcile(np.ones((4, 3)), summing_matrix(3), "mint_median")
+
+
+def test_mint_median_bundle_matches_mint_definition_window(hier_bundle) -> None:
+    median = reconcile_bundle(hier_bundle, "mint_median", WARMUP)
+    shrink = reconcile_bundle(hier_bundle, "mint_shrink", WARMUP)
+    np.testing.assert_array_equal(np.isnan(median.q), np.isnan(shrink.q))
+    np.testing.assert_array_equal(median.shrinkage, shrink.shrinkage)
+    assert median.crossings == 0
+    defined = np.isfinite(median.q).all(axis=(0, 2))
+    np.testing.assert_allclose(
+        median.q[:, defined, 2] - median.q[:, defined, 0],
+        hier_bundle.q[:, defined, 2] - hier_bundle.q[:, defined, 0],
+    )
+
+
+def test_mint_median_is_prefix_invariant(hier_bundle) -> None:
+    full = reconcile_bundle(hier_bundle, "mint_median", WARMUP)
+    part = reconcile_bundle(_truncate(hier_bundle, 15), "mint_median", WARMUP)
+    np.testing.assert_array_equal(part.q, full.q[:, :15])
 
 
 def test_available_errors_uses_targets_known_by_forecast_date(hier_bundle) -> None:
