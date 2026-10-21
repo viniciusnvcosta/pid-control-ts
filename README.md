@@ -122,3 +122,10 @@ the temporal coverage of the US series. See `docs/development.md` to run it and
 Phase 1 (`results/us-hier-v2`, see `docs/analysis/us-hier-v2.md`) found a null result on the
 single COVIDhub ensemble series. Phase 2 asks the same question across a panel of eligible
 forecasters × reconcilers × controllers: `uv run python -m hcp.run configs/panel_leaves.toml`.
+
+The D30 exploratory benchmark compares fixed probabilistic ARIMA, SARIMA, and DeepAR-style
+(Darts LSTM + Gaussian likelihood) forecasts with the COVIDhub reference, both before and
+after hierarchical reconciliation, under the same panel scoring and bootstrap protocol.
+Its pre-registered configuration is `configs/model_benchmarks.toml`; review and operating
+instructions are in `docs/development.md`, and results must not be launched or inspected
+before the D30 review gate is clean.

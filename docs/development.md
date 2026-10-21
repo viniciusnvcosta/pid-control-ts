@@ -14,6 +14,10 @@ uv run ruff format --check src scripts tests/unit tests/integration tests/e2e te
 uv run pytest                        # unit + e2e (synthetic data)
 uv run pytest -m integration         # real data parity and sanity (needs data/deaths.csv)
 uv run pytest -o addopts='' -q       # everything
+
+# Probabilistic benchmark focus
+uv run pytest -o addopts='' -q tests/unit/test_benchmark_data.py tests/unit/test_forecast.py tests/unit/test_benchmark.py tests/unit/test_benchmark_report.py
+uv run pytest -o addopts='' -q -m integration tests/integration/test_benchmark_real.py tests/integration/test_forecast_models.py
 ```
 
 ## Run
@@ -29,6 +33,25 @@ A run never overwrites: copy the TOML and change `run_id`.
 The panel design (`configs/panel_leaves.toml`) additionally writes `level_metrics.parquet`
 (per-level metrics, `leaf_mean`/`us`), `summary.parquet` (cross-forecaster summary, D24), and
 `eligibility.parquet` (the D21 eligibility table for every forecaster in the input).
+
+### Probabilistic model benchmark
+
+Run only after the D30 whole-branch review gate is clean. The registered run is CPU-heavy:
+ARIMA and SARIMA refit every node at every eligible weekly origin, and DeepAR runs on CPU
+with deterministic training, one device, and no data-loader workers. Expect high CPU use
+and a long runtime.
+
+```bash
+UV_CACHE_DIR=/tmp/pid-control-ts-uv-cache uv run python -m hcp.run configs/model_benchmarks.toml 2> /tmp/model-benchmarks-v1.stderr
+rg -n -i 'warning|error|exception|traceback|failed|nan|inf' /tmp/model-benchmarks-v1.stderr
+```
+
+The immutable run is written to `results/model-benchmarks-v1/`; analysis belongs in
+`docs/analysis/model-benchmarks-v1.md` with selected publication figures under
+`docs/analysis/figures/`. Reconcile every stderr match with the manifest's warning
+diagnostics before analysis. Runs never overwrite. If either the final directory or
+`results/.model-benchmarks-v1.partial` exists, inspect it and choose a recovery action;
+the runner deliberately never deletes stale staging output.
 
 ## Post-hoc analysis
 ```bash
