@@ -9,8 +9,8 @@ sha256sum data/deaths.csv   # cb4dccfd21d6c08b1247aa9a7c6a8d93f7c373871526cfcb48
 
 ## Checks
 ```bash
-uv run ruff check src tests/unit tests/integration tests/e2e tests/helpers.py tests/conftest.py
-uv run ruff format --check src tests/unit tests/integration tests/e2e tests/helpers.py tests/conftest.py
+uv run ruff check src scripts tests/unit tests/integration tests/e2e tests/helpers.py tests/conftest.py
+uv run ruff format --check src scripts tests/unit tests/integration tests/e2e tests/helpers.py tests/conftest.py
 uv run pytest                        # unit + e2e (synthetic data)
 uv run pytest -m integration         # real data parity and sanity (needs data/deaths.csv)
 uv run pytest -o addopts='' -q       # everything
@@ -18,12 +18,24 @@ uv run pytest -o addopts='' -q       # everything
 
 ## Run
 ```bash
-uv run python -m hcp.run configs/us_hier.toml   # -> results/us-hier-v1/
+uv run python -m hcp.run configs/us_hier.toml       # -> results/us-hier-v1/
+uv run python -m hcp.run configs/panel_leaves.toml  # -> results/panel-leaves-v1/
 ```
 Artifacts: `manifest.json` (config, git SHA/dirty, input SHA-256, seed, versions, diagnostics),
 `intervals.parquet` (long: week, reconciler, controller, lr, y, q_lo, q_med, q_hi, lo, hi),
 `metrics.parquet`, `contrasts.parquet` (primary flag, Holm-adjusted p), `figures/*.pdf`.
 A run never overwrites: copy the TOML and change `run_id`.
+
+The panel design (`configs/panel_leaves.toml`) additionally writes `level_metrics.parquet`
+(per-level metrics, `leaf_mean`/`us`), `summary.parquet` (cross-forecaster summary, D24), and
+`eligibility.parquet` (the D21 eligibility table for every forecaster in the input).
+
+## Post-hoc analysis
+```bash
+uv run python -m scripts.analysis.us_hier_v2 --run-dir results/us-hier-v2
+```
+Exploratory, non-confirmatory diagnostics for a finished US-design run; writes JSON and
+figures under `--out` (default `docs/analysis/`).
 
 ## Paper harness
 `tests/*.py`, `tests/configs/*.yaml`, `run_tests.sh`, `make_plots.sh` are the upstream experiment

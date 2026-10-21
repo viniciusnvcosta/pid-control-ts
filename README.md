@@ -118,3 +118,7 @@ This fork asks whether reconciling the COVIDhub ensemble's 4-week-ahead death qu
 the US → 56-leaf hierarchy (bottom-up, MinT(Shrink)) before conformal P/PI/PID control improves
 the temporal coverage of the US series. See `docs/development.md` to run it and
 `docs/protocol-decisions.md` for the pre-registered protocol.
+
+Phase 1 (`results/us-hier-v2`, see `docs/analysis/us-hier-v2.md`) found a null result on the
+single COVIDhub ensemble series. Phase 2 asks the same question across a panel of eligible
+forecasters × reconcilers × controllers: `uv run python -m hcp.run configs/panel_leaves.toml`.

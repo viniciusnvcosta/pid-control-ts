@@ -1,4 +1,4 @@
-# ABOUTME: Loads COVIDhub 4-week-ahead death forecasts into a US -> 56-leaf hierarchy bundle.
+# ABOUTME: Loads COVIDhub 4-week-ahead death forecasts into a US -> 56-leaf hierarchy bundle, for any forecaster.
 # ABOUTME: Verifies the input SHA-256, carries missing leaf quantiles forward causally, never imputes truth.
 """Data stage (decisions D1, D5, D6).
 
@@ -6,6 +6,10 @@ Rows are the root ``us`` followed by the leaves in alphabetical order. The week 
 the set of target weeks where the US forecast and truth are complete. Leading weeks in
 which some leaf has never been forecast are trimmed, and later leaf gaps are filled by
 last observation carried forward (LOCF) and flagged in ``imputed``.
+
+``read_forecasts`` reads the CSV once into a shared frame. ``build_bundle`` selects
+one forecaster from that frame; ``build_bundles`` reuses it to build one bundle per
+forecaster, recording ``None`` when no usable bundle can be built.
 """
 
 import hashlib
@@ -20,6 +24,7 @@ FORECASTER = "COVIDhub-4_week_ensemble"
 AHEAD = 4
 QUANTILE_LEVELS = (0.1, 0.5, 0.9)
 QUANTILE_COLUMNS = tuple(f"forecast_{level}" for level in QUANTILE_LEVELS)
+TERRITORIES: tuple[str, ...] = ("as", "gu", "mp", "pr", "vi")
 _COLUMNS = [
     "ahead",
     "geo_value",
@@ -61,15 +66,15 @@ def file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def load_hierarchy(path: Path, expected_sha256: str | None = None) -> HierarchyBundle:
-    """Load the ensemble's 4-week-ahead forecasts for ``us`` and every leaf.
+def read_forecasts(path: Path, expected_sha256: str | None = None) -> pd.DataFrame:
+    """Read the raw forecasts CSV and keep only the ``AHEAD``-week-ahead rows.
 
     Args:
         path: The deaths.csv file (paper's LFS input schema).
         expected_sha256: If given, the file's SHA-256 must match.
 
     Raises:
-        ValueError: On a SHA-256 mismatch, duplicate rows, a missing root, or no usable week.
+        ValueError: On a SHA-256 mismatch.
     """
     path = Path(path)
     if expected_sha256 is not None:
@@ -79,7 +84,23 @@ def load_hierarchy(path: Path, expected_sha256: str | None = None) -> HierarchyB
     frame = pd.read_csv(
         path, usecols=_COLUMNS, parse_dates=["forecast_date", "target_end_date"]
     )
-    frame = frame[(frame["ahead"] == AHEAD) & (frame["forecaster"] == FORECASTER)]
+    return frame[frame["ahead"] == AHEAD]
+
+
+def build_bundle(frame: pd.DataFrame, forecaster: str = FORECASTER) -> HierarchyBundle:
+    """Build a hierarchy bundle for one forecaster from an already-read frame.
+
+    Args:
+        frame: A frame as returned by ``read_forecasts``.
+        forecaster: The forecaster to select.
+
+    Raises:
+        ValueError: If ``forecaster`` has no rows, on duplicate rows, a missing root,
+            or no usable week.
+    """
+    frame = frame[(frame["ahead"] == AHEAD) & (frame["forecaster"] == forecaster)]
+    if frame.empty:
+        raise ValueError(f"no rows for forecaster {forecaster!r}")
     if frame.duplicated(["geo_value", "target_end_date"]).any():
         raise ValueError("duplicate (geo_value, target_end_date) rows")
     if ROOT not in set(frame["geo_value"]):
@@ -120,3 +141,27 @@ def load_hierarchy(path: Path, expected_sha256: str | None = None) -> HierarchyB
     for array in arrays.values():
         array.setflags(write=False)
     return HierarchyBundle(nodes=nodes, **arrays)
+
+
+def load_hierarchy(path: Path, expected_sha256: str | None = None) -> HierarchyBundle:
+    """Load the ensemble's 4-week-ahead forecasts for ``us`` and every leaf.
+
+    Args:
+        path: The deaths.csv file (paper's LFS input schema).
+        expected_sha256: If given, the file's SHA-256 must match.
+
+    Raises:
+        ValueError: On a SHA-256 mismatch, duplicate rows, a missing root, or no usable week.
+    """
+    return build_bundle(read_forecasts(path, expected_sha256))
+
+
+def build_bundles(frame: pd.DataFrame) -> dict[str, HierarchyBundle | None]:
+    """One bundle per forecaster in ``frame``, sorted by name; ``None`` where none can be built."""
+    bundles: dict[str, HierarchyBundle | None] = {}
+    for name in sorted(frame["forecaster"].unique()):
+        try:
+            bundles[name] = build_bundle(frame, name)
+        except ValueError:
+            bundles[name] = None
+    return bundles

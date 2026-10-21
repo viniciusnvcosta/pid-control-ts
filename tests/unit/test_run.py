@@ -6,8 +6,17 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from hcp.run import RunConfig, load_config, run_experiment
-from tests.helpers import write_config
+from hcp.conformal import ControllerConfig
+from hcp.data import FORECASTER
+from hcp.run import (
+    PRIMARY,
+    RunConfig,
+    _manifest,
+    load_config,
+    panel_config,
+    run_experiment,
+)
+from tests.helpers import D21_ELIGIBLE, ROOT_DIR, write_config
 
 BASE = {
     "run_id": "unit",
@@ -54,6 +63,23 @@ def test_unknown_key_raises(tmp_path: Path) -> None:
         {"lr": 0.3},
         {"blocks": ()},
         {"n_boot": 0},
+        {"design": "both"},
+        {"forecasters": ("x",)},
+        {
+            "design": "panel",
+            "controllers": ("raw", "pi", "pid_theta"),
+            "forecasters": (FORECASTER,),
+        },
+        {
+            "design": "panel",
+            "controllers": ("raw", "pi"),
+            "forecasters": ("x",),
+        },
+        {
+            "design": "panel",
+            "controllers": ("raw", "pi"),
+            "forecasters": (FORECASTER, FORECASTER),
+        },
     ],
 )
 def test_invalid_config_raises(override: dict) -> None:
@@ -91,3 +117,59 @@ def test_truth_incoherence_is_scoped_to_the_evaluation_window(hier_bundle) -> No
     cfg = RunConfig(**BASE, **SMALL)
     result = run_experiment(cfg, bundle)
     assert result.diagnostics["truth_incoherence"]["max_abs"] == 0.0
+
+
+def test_panel_config_maps_fields() -> None:
+    cfg = RunConfig(
+        **BASE,
+        **SMALL,
+        design="panel",
+        forecasters=(FORECASTER, "synth-alt"),
+    )
+    panel_cfg = panel_config(cfg)
+    assert panel_cfg.controller == ControllerConfig(
+        alpha=cfg.alpha,
+        lr=cfg.lr,
+        Csat=cfg.Csat,
+        KI=cfg.KI,
+        T_burnin=cfg.T_burnin,
+        ahead=cfg.ahead,
+    )
+    assert panel_cfg.lr_grid == cfg.lr_grid
+    assert panel_cfg.reconcilers == cfg.reconcilers
+    assert panel_cfg.controllers == cfg.controllers
+    assert panel_cfg.mint_warmup == cfg.mint_warmup
+    assert panel_cfg.rolling_window == cfg.rolling_window
+    assert panel_cfg.blocks == cfg.blocks
+    assert panel_cfg.n_boot == cfg.n_boot
+    assert panel_cfg.root_seed == cfg.root_seed
+    assert panel_cfg.primary_forecaster == FORECASTER
+
+
+def test_panel_leaves_config_is_the_preregistered_run() -> None:
+    cfg = load_config(ROOT_DIR / "configs" / "panel_leaves.toml")
+    assert cfg.design == "panel"
+    assert sorted(cfg.forecasters) == D21_ELIGIBLE
+    assert cfg.forecasters[0] == FORECASTER
+
+
+def test_us_design_manifest_keys_unchanged() -> None:
+    cfg = RunConfig(**BASE, **SMALL)
+    manifest = _manifest(
+        cfg,
+        "deadbeef",
+        primary=PRIMARY,
+        seed={"root_seed": cfg.root_seed, "block_children": len(cfg.blocks)},
+        diagnostics={},
+    )
+    expected_keys = {
+        "config",
+        "git_sha",
+        "git_dirty",
+        "timestamp_utc",
+        "input_sha256",
+        "seed",
+        "versions",
+        "diagnostics",
+    }
+    assert expected_keys <= manifest.keys()

@@ -4,16 +4,23 @@
 
 Usage: ``uv run python -m hcp.run configs/us_hier.toml``.
 
-Every arm (reconciler x controller x lr) starts at the common evaluation week given by
-the MinT warm-up (D7), so all arms are scored on the same weeks. Contrasts use one set
-of moving-block resamples per block length, shared by every arm (paired, D12).
+Two designs share this orchestrator. ``design = "us"`` (Phase 1) runs every arm
+(reconciler x controller x lr) on the single US series, starting at the common
+evaluation week given by the MinT warm-up (D7). ``design = "panel"`` (Phase 2) runs
+the leaves x forecasters panel (D20-D26): it reads every forecaster, checks D21
+eligibility, and runs the panel reconcilers (``none``, ``bottom_up``, ``mint_shrink``,
+``mint_median``) and controllers (``raw``, ``pi``; ``pid_theta`` is rejected, D22) on
+each eligible forecaster's own evaluation window. Contrasts use one set of
+moving-block resamples per block length, shared by every arm (paired, D12).
 """
 
 import argparse
+import ctypes
+import errno
 import json
+import os
 import platform
 import subprocess
-import tomllib
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -22,11 +29,23 @@ import numpy as np
 import pandas as pd
 import statsmodels
 
-from hcp.conformal import CONTROLLERS, ControllerConfig, conformalize
-from hcp.data import HierarchyBundle, file_sha256, load_hierarchy
+# RunConfig, load_config and panel_config are re-exported as part of the run API.
+from hcp.config import RunConfig, controller_config, load_config, panel_config
+from hcp.conformal import conformalize
+from hcp.data import (
+    FORECASTER,
+    HierarchyBundle,
+    build_bundles,
+    file_sha256,
+    load_hierarchy,
+    read_forecasts,
+)
+from hcp.eligibility import EligibilityRule, eligibility, require_eligible
 from hcp.evaluate import METRIC_NAMES, evaluate
-from hcp.reconcile import RECONCILERS, evaluation_start, reconcile_bundle
-from hcp.report import RAW_LR, render_figures
+from hcp.panel import PRIMARY as PANEL_PRIMARY
+from hcp.panel import PanelResult, run_panel
+from hcp.reconcile import evaluation_start, reconcile_bundle
+from hcp.report import RAW_LR, render_figures, render_panel_figures
 from hcp.stats import draw_blocks, holm, summarize_diff
 
 PRIMARY = {
@@ -39,56 +58,6 @@ COMPARISONS = (("mint_shrink", "none"), ("bottom_up", "none"))
 
 
 @dataclass(frozen=True)
-class RunConfig:
-    """One pre-registered experiment; see docs/protocol-decisions.md."""
-
-    run_id: str
-    root_seed: int
-    data_path: Path
-    output_dir: Path
-    expected_sha256: str | None = None
-    alpha: float = 0.2
-    lr: float = 0.1
-    lr_grid: tuple[float, ...] = (1.0, 0.5, 0.1, 0.05)
-    Csat: float = 2.0
-    KI: float = 1000.0
-    T_burnin: int = 5
-    ahead: int = 4
-    reconcilers: tuple[str, ...] = ("none", "bottom_up", "mint_shrink")
-    controllers: tuple[str, ...] = ("raw", "pi", "pid_theta")
-    mint_warmup: int = 20
-    rolling_window: int = 10
-    blocks: tuple[int, ...] = (8, 4, 12)
-    n_boot: int = 2000
-
-    def __post_init__(self) -> None:
-        if not self.run_id or Path(self.run_id).name != self.run_id:
-            raise ValueError("run_id must be a bare directory name")
-        if (
-            isinstance(self.root_seed, bool)
-            or not isinstance(self.root_seed, int)
-            or self.root_seed < 0
-        ):
-            raise ValueError("root_seed must be a non-negative integer")
-        for name in ("lr_grid", "reconcilers", "controllers", "blocks"):
-            object.__setattr__(self, name, tuple(getattr(self, name)))
-        for name in ("data_path", "output_dir"):
-            object.__setattr__(self, name, Path(getattr(self, name)).expanduser())
-        if "none" not in self.reconcilers:
-            raise ValueError("reconcilers must include the 'none' control")
-        if unknown := set(self.reconcilers) - set(RECONCILERS):
-            raise ValueError(f"unknown reconcilers: {sorted(unknown)}")
-        if unknown := set(self.controllers) - set(CONTROLLERS):
-            raise ValueError(f"unknown controllers: {sorted(unknown)}")
-        if self.lr not in self.lr_grid:
-            raise ValueError("lr must be one of lr_grid")
-        if not self.blocks:
-            raise ValueError("blocks must name at least one block length")
-        if self.n_boot < 1:
-            raise ValueError("n_boot must be positive")
-
-
-@dataclass(frozen=True)
 class ExperimentResult:
     """In-memory outputs of one run."""
 
@@ -96,31 +65,6 @@ class ExperimentResult:
     metrics: pd.DataFrame
     contrasts: pd.DataFrame
     diagnostics: dict
-
-
-def load_config(path: Path) -> RunConfig:
-    """Read a TOML file into a validated ``RunConfig``.
-
-    Raises:
-        ValueError: On unknown or missing keys, or invalid values.
-    """
-    with Path(path).open("rb") as handle:
-        values = tomllib.load(handle)
-    try:
-        return RunConfig(**values)
-    except TypeError as exc:
-        raise ValueError(f"invalid run configuration: {exc}") from exc
-
-
-def _controller_config(cfg: RunConfig, lr: float) -> ControllerConfig:
-    return ControllerConfig(
-        alpha=cfg.alpha,
-        lr=lr,
-        Csat=cfg.Csat,
-        KI=cfg.KI,
-        T_burnin=cfg.T_burnin,
-        ahead=cfg.ahead,
-    )
 
 
 def _arm(
@@ -223,7 +167,7 @@ def run_experiment(cfg: RunConfig, bundle: HierarchyBundle) -> ExperimentResult:
         for controller in cfg.controllers:
             for lr in (RAW_LR,) if controller == "raw" else cfg.lr_grid:
                 lo, hi = conformalize(
-                    y, q_us[:, 0], q_us[:, 2], controller, _controller_config(cfg, lr)
+                    y, q_us[:, 0], q_us[:, 2], controller, controller_config(cfg, lr)
                 )
                 frames.append(
                     pd.DataFrame(
@@ -274,6 +218,33 @@ def _git(*args: str) -> str:
     return completed.stdout.strip()
 
 
+def _manifest(
+    cfg: RunConfig,
+    input_sha256: str,
+    *,
+    primary: dict,
+    seed: dict,
+    diagnostics: dict,
+) -> dict:
+    """Build the manifest dict shared by both designs; callers add their own keys."""
+    return {
+        "config": asdict(cfg),
+        "git_sha": _git("rev-parse", "HEAD"),
+        "git_dirty": bool(_git("status", "--porcelain")),
+        "timestamp_utc": datetime.now(UTC).isoformat(),
+        "input_sha256": input_sha256,
+        "seed": seed,
+        "versions": {
+            "python": platform.python_version(),
+            "numpy": np.__version__,
+            "pandas": pd.__version__,
+            "statsmodels": statsmodels.__version__,
+        },
+        "primary": primary,
+        "diagnostics": diagnostics,
+    }
+
+
 def write_artifacts(
     cfg: RunConfig, result: ExperimentResult, input_sha256: str
 ) -> Path:
@@ -296,23 +267,93 @@ def write_artifacts(
         lr=cfg.lr,
         block=cfg.blocks[0],
     )
-    manifest = {
-        "config": asdict(cfg),
-        "git_sha": _git("rev-parse", "HEAD"),
-        "git_dirty": bool(_git("status", "--porcelain")),
-        "timestamp_utc": datetime.now(UTC).isoformat(),
-        "input_sha256": input_sha256,
-        "seed": {"root_seed": cfg.root_seed, "block_children": len(cfg.blocks)},
-        "versions": {
-            "python": platform.python_version(),
-            "numpy": np.__version__,
-            "pandas": pd.__version__,
-            "statsmodels": statsmodels.__version__,
-        },
-        "primary": PRIMARY,
-        "diagnostics": result.diagnostics,
-    }
+    manifest = _manifest(
+        cfg,
+        input_sha256,
+        primary=PRIMARY,
+        seed={"root_seed": cfg.root_seed, "block_children": len(cfg.blocks)},
+        diagnostics=result.diagnostics,
+    )
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2, default=str))
+    return out
+
+
+def _rename_noreplace(staging: Path, out: Path) -> None:
+    """Atomically publish a directory, refusing replacement or unsupported platforms."""
+    system = platform.system()
+    if system == "Windows":
+        staging.rename(out)  # Windows rename already refuses an existing destination.
+        return
+    rename = (
+        getattr(ctypes.CDLL(None, use_errno=True), "renameat2", None)
+        if system == "Linux"
+        else None
+    )
+    if rename is None:
+        raise OSError(errno.ENOTSUP, "atomic no-replace rename unavailable", str(out))
+    rename.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    rename.restype = ctypes.c_int
+    # AT_FDCWD = -100; RENAME_NOREPLACE = 1 forbids replacing even an empty directory.
+    if rename(-100, os.fsencode(staging), -100, os.fsencode(out), 1):
+        code = ctypes.get_errno()
+        raise OSError(code, os.strerror(code), str(out))
+
+
+def write_panel_artifacts(
+    cfg: RunConfig,
+    result: PanelResult,
+    eligibility_table: pd.DataFrame,
+    input_sha256: str,
+) -> Path:
+    """Stage panel artifacts, then publish them together at ``output_dir / run_id``.
+
+    Raises:
+        FileExistsError: If the run directory already exists.
+        OSError: If atomic no-replace publication is unavailable or fails.
+    """
+    out = cfg.output_dir / cfg.run_id
+    if out.exists():
+        raise FileExistsError(f"{out} exists; choose a new run_id")
+    staging = out.with_name(f".{out.name}.partial")
+    staging.mkdir(parents=True, exist_ok=False)
+    result.intervals.to_parquet(staging / "intervals.parquet", index=False)
+    result.metrics.to_parquet(staging / "metrics.parquet", index=False)
+    result.level_metrics.to_parquet(staging / "level_metrics.parquet", index=False)
+    result.contrasts.to_parquet(staging / "contrasts.parquet", index=False)
+    result.summary.to_parquet(staging / "summary.parquet", index=False)
+    eligibility_table.to_parquet(staging / "eligibility.parquet", index=False)
+    render_panel_figures(
+        result.metrics,
+        result.contrasts,
+        staging / "figures",
+        lr=cfg.lr,
+        block=cfg.blocks[0],
+        primary_forecaster=FORECASTER,
+    )
+    manifest = _manifest(
+        cfg,
+        input_sha256,
+        primary={"forecaster": FORECASTER, **PANEL_PRIMARY},
+        seed={
+            "root_seed": cfg.root_seed,
+            "forecaster_children": len(cfg.forecasters) + 1,
+            "block_children": len(cfg.blocks),
+        },
+        diagnostics=result.diagnostics,
+    )
+    manifest["forecasters"] = list(cfg.forecasters)
+    manifest["summary_note"] = "descriptive only (D24)"
+    manifest["eligibility"] = eligibility_table.to_dict(orient="records")
+    (staging / "manifest.json").write_text(json.dumps(manifest, indent=2, default=str))
+    if out.exists():
+        raise FileExistsError(f"{out} exists; choose a new run_id")
+    _rename_noreplace(staging, out)
     return out
 
 
@@ -327,9 +368,27 @@ def main(argv: list[str] | None = None) -> int:
         raise FileExistsError(
             f"{cfg.output_dir / cfg.run_id} exists; choose a new run_id"
         )
-    bundle = load_hierarchy(cfg.data_path, cfg.expected_sha256)
-    result = run_experiment(cfg, bundle)
-    out = write_artifacts(cfg, result, file_sha256(cfg.data_path))
+    if cfg.design == "panel":
+        frame = read_forecasts(cfg.data_path, cfg.expected_sha256)
+        candidates = build_bundles(frame)
+        if candidates.get(FORECASTER) is None:
+            raise ValueError(f"forecaster {FORECASTER!r} has no usable bundle")
+        rule = EligibilityRule(
+            nodes=candidates[FORECASTER].nodes,
+            mint_warmup=cfg.mint_warmup,
+            min_eval_weeks=cfg.min_eval_weeks,
+            max_leaf_imputed=cfg.max_leaf_imputed,
+            duplicate_share=cfg.duplicate_share,
+        )
+        table = eligibility(candidates, rule)
+        require_eligible(table, cfg.forecasters)
+        bundles = {name: candidates[name] for name in cfg.forecasters}
+        result = run_panel(bundles, panel_config(cfg))
+        out = write_panel_artifacts(cfg, result, table, file_sha256(cfg.data_path))
+    else:
+        bundle = load_hierarchy(cfg.data_path, cfg.expected_sha256)
+        result = run_experiment(cfg, bundle)
+        out = write_artifacts(cfg, result, file_sha256(cfg.data_path))
     print(f"Artifacts: {out}")
     return 0
 

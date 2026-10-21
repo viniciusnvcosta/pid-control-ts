@@ -7,6 +7,8 @@ net-sci-epi ``src/headd_l0/reconcile.py`` and generalized to any number of leave
 follows Wickramasuriya, Athanasopoulos & Hyndman (2019), shrinking the error covariance
 towards its diagonal with the Schafer & Strimmer (2005) lambda. Each quantile level is
 reconciled with the same projection; levels that cross afterwards are re-sorted.
+``mint_median`` (D26) moves every level of a node by that node's MinT median shift, so
+medians are coherent and the base spread is kept.
 """
 
 from collections.abc import Callable
@@ -92,13 +94,25 @@ def _mint_shrink(
     return S @ (gain @ base)
 
 
+def _mint_median(
+    base: np.ndarray, S: np.ndarray, covariance: np.ndarray | None
+) -> np.ndarray:
+    if covariance is None:
+        raise ValueError("mint_median needs the training error covariance")
+    shift = _mint_shrink(base, S, covariance)[:, 1] - base[:, 1]
+    return base + shift[:, None]
+
+
 RECONCILERS: dict[
     str, Callable[[np.ndarray, np.ndarray, np.ndarray | None], np.ndarray]
 ] = {
     "none": _none,
     "bottom_up": _bottom_up,
     "mint_shrink": _mint_shrink,
+    "mint_median": _mint_median,
 }
+
+COVARIANCE_METHODS = frozenset({"mint_shrink", "mint_median"})
 
 
 def reconcile(
@@ -111,7 +125,7 @@ def reconcile(
     """Project base forecasts ``[n_nodes, ...]`` (root first) onto the coherent subspace.
 
     Raises:
-        ValueError: On an unknown method, or ``mint_shrink`` without a covariance.
+        ValueError: On an unknown method, or a MinT method without a covariance.
     """
     if method not in RECONCILERS:
         raise ValueError(f"unknown reconciliation method: {method}")
@@ -180,7 +194,7 @@ def reconcile_bundle(bundle: HierarchyBundle, method: str, warmup: int) -> Recon
     shrinkage = np.full(len(bundle.dates), np.nan)
     for t in range(len(bundle.dates)):
         covariance = None
-        if method == "mint_shrink":
+        if method in COVARIANCE_METHODS:
             errors = available_errors(bundle, t)
             if len(errors) < warmup:
                 continue
