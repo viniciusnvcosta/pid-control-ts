@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from hcp.config import BenchmarkSettings, benchmark_configs, config_manifest
 from hcp.conformal import ControllerConfig
 from hcp.data import FORECASTER
 from hcp.run import (
@@ -153,6 +154,106 @@ def test_panel_leaves_config_is_the_preregistered_run() -> None:
     assert cfg.forecasters[0] == FORECASTER
 
 
+def test_model_benchmark_config_is_the_preregistered_protocol() -> None:
+    cfg = load_config(ROOT_DIR / "configs" / "model_benchmarks.toml")
+    assert cfg.design == "benchmark"
+    assert cfg.run_id == "model-benchmarks-v1"
+    assert cfg.root_seed == 20261021
+    assert cfg.benchmark == BenchmarkSettings()
+    forecast_cfg, benchmark_cfg = benchmark_configs(cfg)
+    assert forecast_cfg.models == ("arima", "sarima", "deepar")
+    assert forecast_cfg.quantiles == (0.1, 0.5, 0.9)
+    assert forecast_cfg.min_train_weeks == 60
+    assert forecast_cfg.refit_every == 1
+    assert forecast_cfg.settings.n_samples == 500
+    assert forecast_cfg.settings.arima_order == (3, 0, 0)
+    assert forecast_cfg.settings.sarima_seasonal_order == (1, 0, 0, 52)
+    assert forecast_cfg.settings.deepar_model == "LSTM"
+    assert forecast_cfg.settings.deepar_input_chunk_length == 12
+    assert forecast_cfg.settings.deepar_training_length == 16
+    assert forecast_cfg.settings.deepar_hidden_dim == 25
+    assert forecast_cfg.settings.deepar_n_rnn_layers == 1
+    assert forecast_cfg.settings.deepar_dropout == 0.0
+    assert forecast_cfg.settings.deepar_batch_size == 32
+    assert forecast_cfg.settings.deepar_n_epochs == 10
+    assert benchmark_cfg.reference_model == "covidhub"
+    assert cfg.benchmark.reference_forecaster == FORECASTER
+    assert benchmark_cfg.min_eval_weeks == 60
+    assert benchmark_cfg.panel.reconcilers == (
+        "none",
+        "bottom_up",
+        "mint_shrink",
+        "mint_median",
+    )
+    assert benchmark_cfg.panel.controllers == ("raw", "pi")
+    assert benchmark_cfg.panel.controller.lr == 0.1
+    assert benchmark_cfg.panel.blocks == (8, 4, 12)
+    assert benchmark_cfg.panel.n_boot == 2000
+    assert forecast_cfg.seed_spawn_key == (0,)
+    assert benchmark_cfg.seed_spawn_key == (1,)
+    assert forecast_cfg.seed_spawn_key != benchmark_cfg.seed_spawn_key
+
+
+def test_benchmark_settings_are_required_only_for_benchmark_design() -> None:
+    with pytest.raises(ValueError, match="benchmark settings"):
+        RunConfig(**BASE, benchmark=BenchmarkSettings())
+    with pytest.raises(ValueError, match="benchmark settings"):
+        RunConfig(**BASE, design="benchmark", controllers=("raw", "pi"))
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"models": ("arima", "unknown", "deepar")},
+        {"models": ("arima", "arima", "deepar")},
+        {"ahead": 1},
+        {"refit_every": 2},
+        {"quantiles": (0.5, 0.1, 0.9)},
+        {"n_samples": 499},
+        {"arima_order": (2, 0, 0)},
+        {"sarima_seasonal_order": (1, 0, 0, 12)},
+        {"deepar_model": "GRU"},
+        {"deepar_input_chunk_length": 11},
+        {"deepar_training_length": 15},
+        {"deepar_hidden_dim": 24},
+        {"deepar_n_rnn_layers": 2},
+        {"deepar_dropout": 0.1},
+        {"deepar_batch_size": 16},
+        {"deepar_n_epochs": 9},
+        {"reference_model": "arima"},
+    ],
+)
+def test_invalid_benchmark_model_settings_raise(override: dict) -> None:
+    with pytest.raises(ValueError):
+        BenchmarkSettings(**override)
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"controllers": ("raw", "pi", "pid_theta")},
+        {"reconcilers": ("bottom_up", "mint_shrink", "mint_median")},
+    ],
+)
+def test_invalid_benchmark_run_arms_raise(override: dict) -> None:
+    values = {
+        **BASE,
+        "design": "benchmark",
+        "controllers": ("raw", "pi"),
+        "reconcilers": ("none", "bottom_up", "mint_shrink", "mint_median"),
+        "benchmark": BenchmarkSettings(),
+        **override,
+    }
+    with pytest.raises(ValueError):
+        RunConfig(**values)
+
+
+def test_existing_config_manifest_shape_omits_absent_benchmark() -> None:
+    for name in ("us_hier.toml", "panel_leaves.toml"):
+        manifest = config_manifest(load_config(ROOT_DIR / "configs" / name))
+        assert "benchmark" not in manifest
+
+
 def test_us_design_manifest_keys_unchanged() -> None:
     cfg = RunConfig(**BASE, **SMALL)
     manifest = _manifest(
@@ -173,3 +274,4 @@ def test_us_design_manifest_keys_unchanged() -> None:
         "diagnostics",
     }
     assert expected_keys <= manifest.keys()
+    assert "benchmark" not in manifest["config"]

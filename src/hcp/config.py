@@ -7,13 +7,87 @@ Validates ``RunConfig`` (see docs/protocol-decisions.md) and maps it onto the
 """
 
 import tomllib
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
+from hcp.benchmark import BenchmarkConfig
 from hcp.conformal import CONTROLLERS, ControllerConfig
 from hcp.data import FORECASTER
+from hcp.forecast import ForecastConfig
+from hcp.forecast_models import ForecastSettings
 from hcp.panel import PanelConfig
 from hcp.reconcile import RECONCILERS
+
+
+@dataclass(frozen=True)
+class BenchmarkSettings:
+    """Frozen pre-registered probabilistic model benchmark settings."""
+
+    models: tuple[str, ...] = ("arima", "sarima", "deepar")
+    reference_model: str = "covidhub"
+    reference_forecaster: str = FORECASTER
+    quantiles: tuple[float, ...] = (0.1, 0.5, 0.9)
+    n_samples: int = 500
+    min_train_weeks: int = 60
+    refit_every: int = 1
+    ahead: int = 4
+    arima_order: tuple[int, int, int] = (3, 0, 0)
+    sarima_seasonal_order: tuple[int, int, int, int] = (1, 0, 0, 52)
+    deepar_model: str = "LSTM"
+    deepar_input_chunk_length: int = 12
+    deepar_training_length: int = 16
+    deepar_hidden_dim: int = 25
+    deepar_n_rnn_layers: int = 1
+    deepar_dropout: float = 0.0
+    deepar_batch_size: int = 32
+    deepar_n_epochs: int = 10
+    min_eval_weeks: int = 60
+    forecast_seed_spawn_key: tuple[int, ...] = (0,)
+    evaluation_seed_spawn_key: tuple[int, ...] = (1,)
+
+    def __post_init__(self) -> None:
+        for name in (
+            "models",
+            "quantiles",
+            "arima_order",
+            "sarima_seasonal_order",
+            "forecast_seed_spawn_key",
+            "evaluation_seed_spawn_key",
+        ):
+            object.__setattr__(self, name, tuple(getattr(self, name)))
+        fixed = {
+            "models": ("arima", "sarima", "deepar"),
+            "reference_model": "covidhub",
+            "reference_forecaster": FORECASTER,
+            "quantiles": (0.1, 0.5, 0.9),
+            "n_samples": 500,
+            "min_train_weeks": 60,
+            "refit_every": 1,
+            "ahead": 4,
+            "arima_order": (3, 0, 0),
+            "sarima_seasonal_order": (1, 0, 0, 52),
+            "deepar_model": "LSTM",
+            "deepar_input_chunk_length": 12,
+            "deepar_training_length": 16,
+            "deepar_hidden_dim": 25,
+            "deepar_n_rnn_layers": 1,
+            "deepar_dropout": 0.0,
+            "deepar_batch_size": 32,
+            "deepar_n_epochs": 10,
+            "min_eval_weeks": 60,
+            "forecast_seed_spawn_key": (0,),
+            "evaluation_seed_spawn_key": (1,),
+        }
+        for name, expected in fixed.items():
+            if getattr(self, name) != expected:
+                raise ValueError(
+                    f"benchmark {name} must be fixed at {expected!r}, "
+                    f"got {getattr(self, name)!r}"
+                )
+        if self.reference_model in self.models:
+            raise ValueError(
+                "benchmark reference model collides with a generated model"
+            )
 
 
 @dataclass(frozen=True)
@@ -43,6 +117,7 @@ class RunConfig:
     min_eval_weeks: int = 60
     max_leaf_imputed: float = 0.05
     duplicate_share: float = 0.95
+    benchmark: BenchmarkSettings | None = None
 
     def __post_init__(self) -> None:
         if not self.run_id or Path(self.run_id).name != self.run_id:
@@ -57,12 +132,20 @@ class RunConfig:
             object.__setattr__(self, name, tuple(getattr(self, name)))
         for name in ("data_path", "output_dir"):
             object.__setattr__(self, name, Path(getattr(self, name)).expanduser())
-        if self.design not in ("us", "panel"):
-            raise ValueError(f"design must be 'us' or 'panel', got {self.design!r}")
+        if isinstance(self.benchmark, dict):
+            object.__setattr__(self, "benchmark", BenchmarkSettings(**self.benchmark))
+        if self.design not in ("us", "panel", "benchmark"):
+            raise ValueError(
+                f"design must be 'us', 'panel', or 'benchmark', got {self.design!r}"
+            )
+        if self.design == "benchmark" and self.benchmark is None:
+            raise ValueError("design 'benchmark' requires benchmark settings")
+        if self.design != "benchmark" and self.benchmark is not None:
+            raise ValueError("benchmark settings require design 'benchmark'")
         if self.design == "us":
             if self.forecasters != (FORECASTER,):
                 raise ValueError("design 'us' requires forecasters == (FORECASTER,)")
-        else:
+        elif self.design == "panel":
             if "pid_theta" in self.controllers:
                 raise ValueError("pid_theta is rejected for design 'panel' (D22)")
             if FORECASTER not in self.forecasters:
@@ -71,6 +154,26 @@ class RunConfig:
                 )
             if len(set(self.forecasters)) != len(self.forecasters):
                 raise ValueError("forecasters must not contain duplicates")
+        else:
+            if self.controllers != ("raw", "pi"):
+                raise ValueError("benchmark controllers must be ('raw', 'pi')")
+            expected_reconcilers = (
+                "none",
+                "bottom_up",
+                "mint_shrink",
+                "mint_median",
+            )
+            if self.reconcilers != expected_reconcilers:
+                raise ValueError(
+                    f"benchmark reconcilers must be {expected_reconcilers!r}"
+                )
+            assert self.benchmark is not None
+            if self.ahead != self.benchmark.ahead:
+                raise ValueError("run and benchmark horizons must match")
+            if self.min_eval_weeks != self.benchmark.min_eval_weeks:
+                raise ValueError(
+                    "run and benchmark minimum evaluation weeks must match"
+                )
         if "none" not in self.reconcilers:
             raise ValueError("reconcilers must include the 'none' control")
         if unknown := set(self.reconcilers) - set(RECONCILERS):
@@ -94,6 +197,8 @@ def load_config(path: Path) -> RunConfig:
     with Path(path).open("rb") as handle:
         values = tomllib.load(handle)
     try:
+        if "benchmark" in values:
+            values["benchmark"] = BenchmarkSettings(**values["benchmark"])
         return RunConfig(**values)
     except TypeError as exc:
         raise ValueError(f"invalid run configuration: {exc}") from exc
@@ -124,3 +229,60 @@ def panel_config(cfg: RunConfig) -> PanelConfig:
         root_seed=cfg.root_seed,
         primary_forecaster=FORECASTER,
     )
+
+
+def benchmark_configs(cfg: RunConfig) -> tuple[ForecastConfig, BenchmarkConfig]:
+    """Map a benchmark run onto its numeric forecast and evaluation configs.
+
+    Args:
+        cfg: A validated benchmark run configuration.
+
+    Returns:
+        Forecast generation and common-window evaluation configurations.
+
+    Raises:
+        ValueError: If ``cfg`` is not a benchmark design.
+    """
+    if cfg.design != "benchmark" or cfg.benchmark is None:
+        raise ValueError("benchmark_configs requires design 'benchmark'")
+    settings = cfg.benchmark
+    forecast_settings = ForecastSettings(
+        ahead=settings.ahead,
+        n_samples=settings.n_samples,
+        arima_order=settings.arima_order,
+        sarima_seasonal_order=settings.sarima_seasonal_order,
+        deepar_model=settings.deepar_model,
+        deepar_input_chunk_length=settings.deepar_input_chunk_length,
+        deepar_training_length=settings.deepar_training_length,
+        deepar_hidden_dim=settings.deepar_hidden_dim,
+        deepar_n_rnn_layers=settings.deepar_n_rnn_layers,
+        deepar_dropout=settings.deepar_dropout,
+        deepar_batch_size=settings.deepar_batch_size,
+        deepar_n_epochs=settings.deepar_n_epochs,
+    )
+    forecast = ForecastConfig(
+        models=settings.models,
+        quantiles=settings.quantiles,
+        min_train_weeks=settings.min_train_weeks,
+        refit_every=settings.refit_every,
+        root_seed=cfg.root_seed,
+        seed_spawn_key=settings.forecast_seed_spawn_key,
+        settings=forecast_settings,
+    )
+    panel = replace(panel_config(cfg), primary_forecaster=settings.reference_model)
+    benchmark = BenchmarkConfig(
+        panel=panel,
+        models=settings.models,
+        reference_model=settings.reference_model,
+        min_eval_weeks=settings.min_eval_weeks,
+        seed_spawn_key=settings.evaluation_seed_spawn_key,
+    )
+    return forecast, benchmark
+
+
+def config_manifest(cfg: RunConfig) -> dict:
+    """Return a serializable config mapping without absent optional sections."""
+    values = asdict(cfg)
+    if cfg.benchmark is None:
+        values.pop("benchmark")
+    return values

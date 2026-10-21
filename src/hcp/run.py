@@ -21,7 +21,6 @@ import json
 import os
 import platform
 import subprocess
-from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -30,7 +29,7 @@ import pandas as pd
 import statsmodels
 
 # RunConfig, load_config and panel_config are re-exported as part of the run API.
-from hcp.config import RunConfig, load_config, panel_config
+from hcp.config import RunConfig, config_manifest, load_config, panel_config
 from hcp.data import (
     FORECASTER,
     build_bundles,
@@ -65,7 +64,7 @@ def _manifest(
 ) -> dict:
     """Build the manifest dict shared by both designs; callers add their own keys."""
     return {
-        "config": asdict(cfg),
+        "config": config_manifest(cfg),
         "git_sha": _git("rev-parse", "HEAD"),
         "git_dirty": bool(_git("status", "--porcelain")),
         "timestamp_utc": datetime.now(UTC).isoformat(),
