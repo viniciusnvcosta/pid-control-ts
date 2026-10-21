@@ -1,51 +1,45 @@
-<h1 align="center" style="margin-bottom:0px; border-bottom:0px; padding-bottom:0px">Conformal PID Control for Time-Series Prediction</h1>
+# Conformal PID Control for Time-Series Prediction
 
-<p align="center">
-    <a style="text-decoration:none !important;" href="https://arxiv.org/abs/2307.16895" alt="arXiv"><img src="https://img.shields.io/badge/paper-arXiv-red" /></a>
-    <a style="text-decoration:none !important;" href="https://docs.conda.io/en/latest/miniconda.html" alt="package management"> <img src="https://img.shields.io/badge/conda-env-green" /></a>
-    <a style="text-decoration:none !important;" href="https://opensource.org/licenses/MIT" alt="License"><img src="https://img.shields.io/badge/license-MIT-blue.svg" /></a>
-</p>
+[![Paper: arXiv](https://img.shields.io/badge/paper-arXiv-red)](https://arxiv.org/abs/2307.16895)
+[![Package management: uv](https://img.shields.io/badge/package%20management-uv-green)](https://docs.astral.sh/uv/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
-<p align="center">
-    <img width=70% src="https://github.com/aangelopoulos/conformal-time-series/blob/main/media/PID-simplified.svg">
-</p>
+![Simplified PID diagram](media/PID-simplified.svg)
 
-<p>
-This repository is about producing <b>prediction sets for time series</b>.
+This repository is about producing **prediction sets for time series**.
 
-The methods here are guaranteed to have coverage for any, possibly <i>adversarial sequence</i>.
-We take a <b>control systems outlook</b> on performing this task, introducing a method called <a style="text-decoration:none !important;" href="https://arxiv.org/abs/2307.16895" alt="arXiv">Conformal PID Control</a>. 
+The methods here are guaranteed to have coverage for any, possibly _adversarial sequence_.
+We take a **control systems outlook** on performing this task, introducing a method called [Conformal PID Control](https://arxiv.org/abs/2307.16895).
 
 Several methods are implemented herein, including online quantile regression (quantile tracking/P control), adaptive conformal prediction, and more!
-</p>
-
-<p align="center"> <b>This codebase makes it easy to extend the methods/add new datasets.</b>
+**This codebase makes it easy to extend the methods/add new datasets.**
 We will describe how to do so below.
-</p>
 
-<h3 align="center" style="margin-bottom:0px; border-bottom:0px; padding-bottom:0px">Getting Started</h3>
-<p>
-To reproduce the experiments in our paper, clone this repo and run the following code from the root directory.
-<pre>
-conda create --name pid
-pip install -r requirements.txt
+## Getting Started
+
+This project requires Python 3.11.13 or newer and uses [uv](https://docs.astral.sh/uv/) for package management. To reproduce the experiments in the original paper, clone this repo, install `uv`, and run the following from the repository root. The paper configs use Prophet, which is supplied to the upstream harness without adding it to the fork's runtime dependencies.
+
+```bash
+uv sync
 cd tests
-bash run_tests.sh
-bash make_plots.sh
-</pre>
-</p>
+uv run --with prophet bash run_tests.sh
+uv run bash make_plots.sh
+```
 
-The one exception is the COVID experiment. For that experiment, you must first run the jupyter notebook in <code>conformal-time-series/tests/datasets/covid-ts-proc/statewide
-/death-forecasting-perstate-lasso-qr.ipynb</code>.
-It requires the <code>deaths.csv</code> data file, which you can download from <a style="text-decoration:none !important;" href="https://drive.google.com/file/d/1p_l3bKJjypmJDmIZ0tqrwIZWDo8JDjvY/view?usp=sharing" alt="arXiv">this Drive link</a>.
+The one exception is the COVID experiment. It requires the `deaths.csv` data file from [this Drive link](https://drive.google.com/file/d/1p_l3bKJjypmJDmIZ0tqrwIZWDo8JDjvY/view?usp=sharing). Put the file beside the [COVID preprocessing notebook](tests/datasets/covid-ts-proc/statewide/death-forecasting-perstate-lasso-qr.ipynb), then run the notebook before launching the paper harness:
 
-<h3 align="center" style="margin-bottom:0px; border-bottom:0px; padding-bottom:0px">Adding New Methods</h3>
+```bash
+uv run --with jupyter jupyter lab tests/datasets/covid-ts-proc/statewide/death-forecasting-perstate-lasso-qr.ipynb
+```
 
-<h5>Step 1: Defining the method. </h5>
-The <code>core/methods.py</code> file contains all methods.
+## Adding New Methods
+
+### Step 1: Defining the method
+
+The `core/methods.py` file contains all methods.
 Consider the following method header, for the P controller/quantile tracker, as an example:
 
-<pre>
+```python
 def quantile(
     scores,
     alpha,
@@ -55,77 +49,104 @@ def quantile(
     *args,
     **kwargs
 ):
-</pre>
-The first three arguments, <code>scores</code>, <code>alpha</code>, and <code>lr</code>, are <i>required</i> arguments for all methods.
-The first argument, <code>scores</code>, expects a numpy array of conformal scores. The second argument, <code>alpha</code>, is the desired miscoverage. Finally, the third argument, <code>lr</code>, is the learning rate. (In our paper, this is $\eta$, and in the language of control, this is $K_p$.)
+```
 
-The rest of the arguments listed are required arguments specific to the given method. The argument <code>ahead</code> determines how many steps ahead the prediction is made --- for example, if <code>ahead=4</code>, that means we are making 4-step-ahead predictions (one step is defined by the resolution of the input array <code>scores</code>). The function of <code>*args</code> and <code>**kwargs</code> is to allow methods to take arguments given in a dictionary form.
+The first three arguments, `scores`, `alpha`, and `lr`, are _required_ arguments for all methods.
+The first argument, `scores`, expects a numpy array of conformal scores. The second argument, `alpha`, is the desired miscoverage. Finally, the third argument, `lr`, is the learning rate. (In our paper, this is η, and in the language of control, this is Kₚ.)
 
-All methods should <code>return</code> a dictionary of results that includes the method name and the sequence of $q_{t}$. In the quantile example case, the dictionary should look like the following, where <code>qs</code> is a numpy array of quantiles the same length as <code>scores</code>:
-<code>results = {"method": "Quantile", "q" : qs}</code>
+The rest of the arguments listed are required arguments specific to the given method. The argument `ahead` determines how many steps ahead the prediction is made --- for example, if `ahead=4`, that means we are making 4-step-ahead predictions (one step is defined by the resolution of the input array `scores`). The function of `*args` and `**kwargs` is to allow methods to take arguments given in a dictionary form.
+
+All methods should `return` a dictionary of results that includes the method name and the sequence of qₜ. In the quantile example case, the dictionary should look like the following, where `qs` is a numpy array of quantiles the same length as `scores`:
+
+`results = {"method": "Quantile", "q" : qs}`
 Methods that follow this formatting will be able to be processed automatically by our testing infrastructure.
 
-<h5>Step 2: Edit the config to include your method.</h5>
-Tl;Dr: go to each config in <code>tests/configs</code>, and add a line under <code>methods:</code> for each method you want to run, along with what learning rates to test. The below example, from <code>tests/configs/AMZN.yaml</code>, will ask the testing suite to run the quantile tracker on the Amazon stock price dataset with five different learning rate choices.
-<pre>
-  Quantile:
-    lrs:
-      - 1
-      - 0.5
-      - 0.1
-      - 0.05
-      - 0
-</pre>
+### Step 2: Edit the config to include your method
+
+TL;DR: go to each config in `tests/configs`, and add a line under `methods:` for each method you want to run, along with what learning rates to test. The below example, from `tests/configs/AMZN.yaml`, will ask the testing suite to run the quantile tracker on the Amazon stock price dataset with five different learning rate choices.
+
+```yaml
+Quantile:
+  lrs:
+    - 1
+    - 0.5
+    - 0.1
+    - 0.05
+    - 0
+```
 
 As background, this is part of our little testing infrastructure for online conformal.
-The infrastructure spawns a parallel process for every dataset, making it efficient to test one method on all datasets with only one command (the command to run the tests is <code>bash run_tests.sh</code>, and to plot the results is <code>bash make_plots.sh</code>).
+The infrastructure spawns a parallel process for every dataset, making it efficient to test one method on all datasets with only one command (the commands to run the tests and plots are `uv run --with prophet bash run_tests.sh` and `uv run bash make_plots.sh`, respectively, from `tests/`).
 
 The infrastructure works like this.
-<ul>
-    <li>The user defines a file in <code>tests/configs/</code> describing an experiment, i.e., a dataset name and a combination of methods and settings for each method to run. </li>
-    <li>The script <code>tests/run_tests.sh</code> calls <code>tests/base_test.py</code> on every <code>.yaml</code> file in the <code>tests/configs</code> directory.</li>
-    <li>The script <code>tests/make_plots.sh</code> calls <code>inset_plot.py</code></li> and <code>base_plots.py</code> to produce the plots in the main text and appendix of our paper, respectively.
-</ul>
 
-<h5>Step 3: Edit <code>base_test.py</code> to include your method.</h5>
-The code in <a style="text-decoration:none !important;" href="https://github.com/aangelopoulos/conformal-time-series/blob/e6419ac4345f4a4cad254a76f1f232e815679087/tests/base_test.py#L5C3-L5C3">line 5</a> of <code>base_test.py</code> imports all the methods --- import yours as well.
-Then add your method to the big <code>if/else</code> block starting on <a style="text-decoration:none !important;" href="https://github.com/aangelopoulos/conformal-time-series/blob/e6419ac4345f4a4cad254a76f1f232e815679087/tests/base_test.py#L103">line 103</a>.
+- The user defines a file in `tests/configs/` describing an experiment, i.e., a dataset name and a combination of methods and settings for each method to run.
+- The script `tests/run_tests.sh` calls `tests/base_test.py` on every `.yaml` file in the `tests/configs` directory.
+- The script `tests/make_plots.sh` calls `inset_plot.py` and `base_plots.py` to produce the plots in the main text and appendix of our paper, respectively.
 
-<h3 align="center" style="margin-bottom:0px; border-bottom:0px; padding-bottom:0px">Adding New Datasets</h3>
+### Step 3: Edit `base_test.py` to include your method
 
-<h5 align="center" style="margin-bottom:0px; border-bottom:0px; padding-bottom:0px">Step 1: Load and preprocess the dataset.</h5>
+Near the top of [`base_test.py`](tests/base_test.py), import your method from `core`.
+Then add it to the method-dispatch `if/elif` block in the main experiment loop.
 
-First, download your dataset and put it in <code>tests/datasets</code>.
-Then, edit the <code>tests/datasets.py</code> file to add a name for your dataset and some processing code for it. 
-The dataset should be a <code>pandas</code> dataframe with a valid <code>datetime</code> index (it has to be evenly spaced, and correctly formatted with no invalid values), and at least one column simply titled <code>y</code>. This column represents the target value.
+## Adding New Datasets
 
-Alternatively, including a column titled <code>forecasts</code> or <code>scorecasts</code> will cause the infrastructure to use these forecasts/scorecasts instead of the ones it would have produced on its own. This is useful if you have defined a good forecaster/scorecaster outside our framework, and you just want to use our code to run conformal on top of that.
+### Step 1: Load and preprocess the dataset
+
+First, download your dataset and put it in `tests/datasets`.
+Then, edit the `tests/datasets.py` file to add a name for your dataset and some processing code for it.
+The dataset should be a `pandas` dataframe with a valid `datetime` index (it has to be evenly spaced, and correctly formatted with no invalid values), and at least one column simply titled `y`. This column represents the target value.
+
+Alternatively, including a column titled `forecasts` or `scorecasts` will cause the infrastructure to use these forecasts/scorecasts instead of the ones it would have produced on its own. This is useful if you have defined a good forecaster/scorecaster outside our framework, and you just want to use our code to run conformal on top of that.
 Extra columns can be used to add information for more complex forecasting/scorecasting strategies.
 
-<h5 align="center" style="margin-bottom:0px; border-bottom:0px; padding-bottom:0px">Step 2: Create a config file for the dataset.</h5>
-As mentioned above, a config file should be made for each dataset, describing what methods should be run with what parameters.
-The example of <code>tests/configs/AMZN.yaml</code> can be followed.
+### Step 2: Create a config file for the dataset
 
-After executing these two steps, you should be able to run <code>python base_test.py configs/your_dataset.yaml</code> and the results will be computed!
+As mentioned above, a config file should be made for each dataset, describing what methods should be run with what parameters.
+The example of `tests/configs/AMZN.yaml` can be followed.
+
+After executing these two steps, you should be able to run `uv run python base_test.py configs/your_dataset.yaml` from `tests/` and the results will be computed!
 Alternatively, you can just execute the bash scripts.
 
-<h3 align="center" style="margin-bottom:0px; border-bottom:0px; padding-bottom:0px">Workarounds for Known Bugs</h3>
-On M1/M2 Mac, in order to use Prophet, follow the instructions at this link: <code>https://github.com/facebook/prophet/issues/2250</code>.
+## Workarounds for Known Bugs
+
+On M1/M2 Mac, in order to use Prophet, follow the instructions at this link: <https://github.com/facebook/prophet/issues/2250>.
 
 ## Fork: hierarchical reconciliation (state → US)
 
-This fork asks whether reconciling the COVIDhub ensemble's 4-week-ahead death quantiles across
-the US → 56-leaf hierarchy (bottom-up, MinT(Shrink)) before conformal P/PI/PID control improves
-the temporal coverage of the US series. See `docs/development.md` to run it and
-`docs/protocol-decisions.md` for the pre-registered protocol.
+This fork asks whether reconciling 4-week-ahead death quantiles across the US → 56-leaf
+hierarchy before conformal P/PI/PID control improves temporal coverage. The frozen protocols
+and outcome decisions are in [`docs/protocol-decisions.md`](docs/protocol-decisions.md); detailed
+operating instructions are in [`docs/development.md`](docs/development.md).
 
-Phase 1 (`results/us-hier-v2`, see `docs/analysis/us-hier-v2.md`) found a null result on the
-single COVIDhub ensemble series. Phase 2 asks the same question across a panel of eligible
-forecasters × reconcilers × controllers: `uv run python -m hcp.run configs/panel_leaves.toml`.
+The completed experiments are negative results rather than evidence of a general hierarchy
+benefit:
 
-The D30 exploratory benchmark compares fixed probabilistic ARIMA, SARIMA, and DeepAR-style
-(Darts LSTM + Gaussian likelihood) forecasts with the COVIDhub reference, both before and
-after hierarchical reconciliation, under the same panel scoring and bootstrap protocol.
-Its pre-registered configuration is `configs/model_benchmarks.toml`; review and operating
-instructions are in `docs/development.md`, and results must not be launched or inspected
-before the D30 review gate is clean.
+- [Phase 1](docs/analysis/us-hier-v2.md) found a null result for the single COVIDhub ensemble
+  series.
+- [Phase 2](docs/analysis/panel-leaves-v1.md) found no supported leaf-level benefit across the
+  eligible-forecaster panel; unreconciled and reconciled arms instead expose level- and
+  coverage-width trade-offs (D29).
+- The [probabilistic model benchmark](docs/analysis/model-benchmarks-v1.md) found that the
+  COVIDhub ensemble remained stronger than fixed ARIMA, SARIMA, and DeepAR-style forecasts,
+  with or without MinT(Shrink), and found no general hierarchy benefit (D31).
+
+### Reproducing the fork experiments
+
+Download the same `deaths.csv` source used above to `data/deaths.csv` and verify it before
+running an experiment:
+
+```bash
+sha256sum data/deaths.csv
+# cb4dccfd21d6c08b1247aa9a7c6a8d93f7c373871526cfcb4860df884b54ac06
+
+uv run python -m hcp.run configs/us_hier.toml
+uv run python -m hcp.run configs/panel_leaves.toml
+uv run python -m hcp.run configs/model_benchmarks.toml
+```
+
+Each command publishes an immutable directory under `results/<run_id>/` and refuses to
+overwrite an existing run. Copy the relevant TOML file and choose a new `run_id` before a
+rerun. The probabilistic benchmark is CPU-heavy because ARIMA and SARIMA are refit for every
+node and weekly origin and DeepAR trains deterministically on CPU; see the development guide
+for focused checks, runtime guidance, stderr review, and artifact details.
