@@ -17,6 +17,7 @@ from hcp.panel import (
     run_panel,
     summarize_forecasters,
 )
+from hcp.reconcile import evaluation_start
 from hcp.report import RAW_LR
 from hcp.run import RunConfig, run_experiment
 from tests.helpers import ALT_FORECASTER
@@ -69,6 +70,26 @@ def test_forecaster_arms_nodes_and_endpoint(panel_frame) -> None:
     arms = forecaster_arms(bundle, ARMS_SMALL)
     assert arms.nodes == ("us", "aa", "bb", "cc")
     np.testing.assert_array_equal(arms.endpoint, [False, True, True, True])
+
+
+def test_forecaster_arms_respects_valid_explicit_evaluation_index(panel_frame) -> None:
+    bundle = build_bundle(panel_frame, FORECASTER)
+    automatic = evaluation_start(bundle, SMALL.mint_warmup)
+
+    explicit = forecaster_arms(bundle, SMALL, evaluation_index=automatic + 1)
+    unchanged = forecaster_arms(bundle, SMALL)
+
+    np.testing.assert_array_equal(explicit.weeks, bundle.dates[automatic + 1 :])
+    np.testing.assert_array_equal(unchanged.weeks, bundle.dates[automatic:])
+
+
+@pytest.mark.parametrize("evaluation_index", [-1, 0, 1000])
+def test_forecaster_arms_rejects_invalid_explicit_evaluation_index(
+    panel_frame, evaluation_index: int
+) -> None:
+    bundle = build_bundle(panel_frame, FORECASTER)
+    with pytest.raises(ValueError, match="evaluation index|known error"):
+        forecaster_arms(bundle, SMALL, evaluation_index=evaluation_index)
 
 
 def test_forecaster_arms_diagnostics_record_evaluation_end_and_endpoint_count(

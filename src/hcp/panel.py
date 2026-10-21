@@ -33,7 +33,7 @@ from hcp.panel_metrics import (
     node_metrics,
     node_scale,
 )
-from hcp.reconcile import evaluation_start, reconcile_bundle
+from hcp.reconcile import available_errors, evaluation_start, reconcile_bundle
 from hcp.report import RAW_LR
 from hcp.stats import draw_blocks, holm, summarize_diff
 
@@ -106,13 +106,27 @@ class PanelResult:
     diagnostics: dict
 
 
-def forecaster_arms(bundle: HierarchyBundle, cfg: PanelConfig) -> ForecasterArms:
+def forecaster_arms(
+    bundle: HierarchyBundle,
+    cfg: PanelConfig,
+    *,
+    evaluation_index: int | None = None,
+) -> ForecasterArms:
     """Reconcile and conformalize every scored node on the forecaster's evaluation window.
 
     A node is scored only when its truth is complete on the window (D25); unscored
     nodes are dropped and recorded in ``diagnostics["unscored_nodes"]``.
     """
-    t0 = evaluation_start(bundle, cfg.mint_warmup)
+    if evaluation_index is None:
+        t0 = evaluation_start(bundle, cfg.mint_warmup)
+    else:
+        t0 = evaluation_index
+        if not 0 <= t0 < len(bundle.dates):
+            raise ValueError("evaluation index is outside the bundle date grid")
+        if len(available_errors(bundle, t0)) < cfg.mint_warmup:
+            raise ValueError(
+                f"evaluation index has fewer than {cfg.mint_warmup} known error weeks"
+            )
     window_y = bundle.y[:, t0:]
     scored = np.isfinite(window_y).all(axis=1)
     nodes = tuple(name for name, keep in zip(bundle.nodes, scored, strict=True) if keep)
