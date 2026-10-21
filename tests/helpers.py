@@ -104,6 +104,33 @@ def panel_rows(seed: int = 0) -> list[dict]:
     return rows + extra
 
 
+def benchmark_rows() -> list[dict]:
+    """Small two-forecaster frame with canonical truth and one forecast gap."""
+    rows: list[dict] = []
+    dates = pd.date_range("2022-01-01", periods=3, freq="7D")
+    truth = {"us": (30.0, 33.0, 36.0), "aa": (10.0, 11.0, 12.0)}
+    for forecaster in (FORECASTER, ALT_FORECASTER):
+        for node, values in truth.items():
+            for index, (target, actual) in enumerate(zip(dates, values, strict=True)):
+                if forecaster == FORECASTER and node == "aa" and index == 1:
+                    continue
+                median = actual + (1.0 if forecaster == FORECASTER else 2.0)
+                rows.append(
+                    {
+                        "ahead": 4,
+                        "geo_value": node,
+                        "forecaster": forecaster,
+                        "forecast_date": target - pd.Timedelta(days=26),
+                        "target_end_date": target,
+                        "forecast_0.1": median - 2.0,
+                        "forecast_0.5": median,
+                        "forecast_0.9": median + 2.0,
+                        "actual": actual,
+                    }
+                )
+    return rows
+
+
 def _toml_value(value: object) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
