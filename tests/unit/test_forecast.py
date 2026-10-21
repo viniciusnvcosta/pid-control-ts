@@ -66,6 +66,9 @@ def test_generation_is_causal_interpolates_prefix_and_uses_horizon_four(
 
     histories = seen[0]
     assert all(history.dates[-1] <= forecast_dates[0] for history in histories)
+    assert all(
+        history.dates[-1] == dates[0] - np.timedelta64(28, "D") for history in histories
+    )
     assert histories[1].dates[0] == panel.dates[1]
     assert histories[1].values[9] == 20.0
     expected = histories[0].values[-1] + np.array([300.6, 303.0, 305.4])
@@ -159,6 +162,16 @@ def test_nonweekly_grid_raises(monkeypatch) -> None:
     dates[1] += np.timedelta64(1, "D")
     monkeypatch.setitem(FORECASTERS, "literal", _literal_adapter)
     with pytest.raises(ValueError, match="weekly"):
+        generate_model_bundles(panel, dates, forecast_dates, _config())
+
+
+def test_non_horizon_four_origin_target_lag_raises(monkeypatch) -> None:
+    panel = _panel()
+    dates, forecast_dates = _grid(panel, 64, 65)
+    forecast_dates = forecast_dates + np.timedelta64(7, "D")
+    monkeypatch.setitem(FORECASTERS, "literal", _literal_adapter)
+
+    with pytest.raises(ValueError, match="26-day|horizon-four"):
         generate_model_bundles(panel, dates, forecast_dates, _config())
 
 

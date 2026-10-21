@@ -92,6 +92,29 @@ def test_common_window_accepts_60_and_rejects_59_weeks() -> None:
         common_evaluation_index(rejected, _config())
 
 
+def test_common_window_advances_past_shared_truth_gap() -> None:
+    bundles = _bundles(90)
+    for model, bundle in bundles.items():
+        y = bundle.y.copy()
+        y[1, 25] = np.nan
+        bundles[model] = replace(bundle, y=y)
+
+    start = common_evaluation_index(bundles, _config())
+
+    assert start == 26
+
+
+def test_common_window_truth_gap_rejects_suffix_of_only_59_weeks() -> None:
+    bundles = _bundles(90)
+    for model, bundle in bundles.items():
+        y = bundle.y.copy()
+        y[1, 30] = np.nan
+        bundles[model] = replace(bundle, y=y)
+
+    with pytest.raises(ValueError, match="60 common evaluation weeks"):
+        common_evaluation_index(bundles, _config())
+
+
 @pytest.mark.parametrize(
     "mismatch",
     ["keys", "dates", "nodes", "forecast_dates", "root_truth", "nonfinite"],

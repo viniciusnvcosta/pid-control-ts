@@ -297,8 +297,9 @@ def write_benchmark_artifacts(
     }
     manifest["limitations"] = {
         "D15": (
-            "Evaluation and MinT errors use final revised truth rather than "
-            "as-of vintages."
+            "Model training, MinT reconciliation errors, and evaluation use final "
+            "revised truth rather than as-of vintages. PI retains core's inherited "
+            "look-ahead in the learning-rate scale at ahead=4."
         )
     }
     manifest["analysis_note"] = "exploratory benchmark; no unadjusted primary"

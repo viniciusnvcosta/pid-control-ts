@@ -149,7 +149,18 @@ def test_benchmark_writer_creates_complete_atomic_artifact_set(tmp_path: Path) -
     assert manifest["diagnostics"]["forecast"]["canonical_truth"] == {
         "finite_disagreements": 0
     }
-    assert "final revised truth" in manifest["limitations"]["D15"]
+    limitation = manifest["limitations"]["D15"]
+    assert all(
+        phrase in limitation
+        for phrase in (
+            "training",
+            "reconciliation",
+            "evaluation",
+            "final revised truth",
+            "PI",
+            "look-ahead",
+        )
+    )
     assert manifest["analysis_note"] == "exploratory benchmark; no unadjusted primary"
     assert not out.with_name(f".{out.name}.partial").exists()
 

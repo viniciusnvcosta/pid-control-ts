@@ -94,8 +94,8 @@ def _validate_inputs(
     origins = _weekly("forecast dates", forecast_dates)
     if origins.shape != targets.shape:
         raise ValueError("forecast-date and target-date grids must have the same shape")
-    if np.any(origins >= targets):
-        raise ValueError("each forecast date must precede its target date")
+    if np.any(targets - origins != np.timedelta64(26, "D")):
+        raise ValueError("benchmark forecasts require the registered 26-day lag")
     expected = (len(actuals.nodes), len(actual_dates))
     if actuals.y.shape != expected or actuals.observed.shape != expected:
         raise ValueError(f"canonical node/date shape must be {expected}")
@@ -208,6 +208,11 @@ def generate_model_bundles(
     prepared = [
         _prepare_origin(actuals, origin, cfg.min_train_weeks) for origin in origins
     ]
+    for target, item in zip(targets, prepared, strict=True):
+        if item is not None and any(
+            history.dates[-1] != target - np.timedelta64(28, "D") for history in item[0]
+        ):
+            raise ValueError("prepared history violates the horizon-four cutoff")
     if not any(item is not None for item in prepared):
         raise ValueError("no eligible origin has sufficient history for every node")
 

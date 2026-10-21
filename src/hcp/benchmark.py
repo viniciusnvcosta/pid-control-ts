@@ -122,21 +122,20 @@ def common_evaluation_index(
         for model in _required_models(cfg)
     ]
     start = max(starts)
-    nonfinite = np.zeros(len(reference.dates), dtype=bool)
+    invalid = np.zeros(len(reference.dates), dtype=bool)
     for model in _required_models(cfg):
-        nonfinite |= ~np.isfinite(bundles[model].q).all(axis=(0, 2))
-    bad_at_or_after = np.flatnonzero(nonfinite & (np.arange(len(nonfinite)) >= start))
-    if len(bad_at_or_after):
-        start = int(bad_at_or_after[-1] + 1)
-    if start >= len(reference.dates):
-        raise ValueError("no remaining window has finite forecasts for every model")
+        invalid |= ~np.isfinite(bundles[model].q).all(axis=(0, 2))
     endpoint = [
         index
         for index, node in enumerate(reference.nodes)
         if index == 0 or node not in TERRITORIES
     ]
-    if not np.isfinite(reference.y[endpoint, start:]).all():
-        raise ValueError("root or endpoint truth is non-finite on the common window")
+    invalid |= ~np.isfinite(reference.y[endpoint]).all(axis=0)
+    bad_at_or_after = np.flatnonzero(invalid & (np.arange(len(invalid)) >= start))
+    if len(bad_at_or_after):
+        start = int(bad_at_or_after[-1] + 1)
+    if start >= len(reference.dates):
+        raise ValueError("no remaining window has finite forecasts and endpoint truth")
     remaining = len(reference.dates) - start
     if remaining < cfg.min_eval_weeks:
         raise ValueError(
