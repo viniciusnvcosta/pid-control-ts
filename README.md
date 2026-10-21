@@ -111,3 +111,21 @@ Alternatively, you can just execute the bash scripts.
 
 <h3 align="center" style="margin-bottom:0px; border-bottom:0px; padding-bottom:0px">Workarounds for Known Bugs</h3>
 On M1/M2 Mac, in order to use Prophet, follow the instructions at this link: <code>https://github.com/facebook/prophet/issues/2250</code>.
+
+## Fork: hierarchical reconciliation (state → US)
+
+This fork asks whether reconciling the COVIDhub ensemble's 4-week-ahead death quantiles across
+the US → 56-leaf hierarchy (bottom-up, MinT(Shrink)) before conformal P/PI/PID control improves
+the temporal coverage of the US series. See `docs/development.md` to run it and
+`docs/protocol-decisions.md` for the pre-registered protocol.
+
+Phase 1 (`results/us-hier-v2`, see `docs/analysis/us-hier-v2.md`) found a null result on the
+single COVIDhub ensemble series. Phase 2 asks the same question across a panel of eligible
+forecasters × reconcilers × controllers: `uv run python -m hcp.run configs/panel_leaves.toml`.
+
+The D30 exploratory benchmark compares fixed probabilistic ARIMA, SARIMA, and DeepAR-style
+(Darts LSTM + Gaussian likelihood) forecasts with the COVIDhub reference, both before and
+after hierarchical reconciliation, under the same panel scoring and bootstrap protocol.
+Its pre-registered configuration is `configs/model_benchmarks.toml`; review and operating
+instructions are in `docs/development.md`, and results must not be launched or inspected
+before the D30 review gate is clean.

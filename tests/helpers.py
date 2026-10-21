@@ -1,0 +1,148 @@
+# ABOUTME: Test helpers: a synthetic forecast CSV in the real deaths.csv schema, a TOML writer, real-data paths.
+# ABOUTME: The synthetic hierarchy is us + aa/bb/cc, plus panel forecasters ALT/DUP/SHORT for multi-forecaster fixtures.
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+from hcp.data import FORECASTER, QUANTILE_COLUMNS, QUANTILE_LEVELS
+
+ROOT_DIR = Path(__file__).resolve().parents[1]
+REAL_DATA = ROOT_DIR / "data" / "deaths.csv"
+REAL_SHA256 = "cb4dccfd21d6c08b1247aa9a7c6a8d93f7c373871526cfcb4860df884b54ac06"
+PICKLES = ROOT_DIR / "tests" / "datasets" / "covid-ts-proc" / "statewide"
+PICKLE_STATES = ("ak", "ca", "fl", "ga", "ks", "ny", "tx")
+
+D21_ELIGIBLE = [
+    "CEID-Walk",
+    "COVIDhub-4_week_ensemble",
+    "COVIDhub-baseline",
+    "COVIDhub-ensemble",
+    "COVIDhub-trained_ensemble",
+    "JHUAPL-Bucky",
+    "RobertWalraven-ESG",
+    "UMass-MechBayes",
+]
+
+START = pd.Timestamp("2021-01-02")
+N_WEEKS = 30
+LEAVES = ("aa", "bb", "cc")
+LATE_LEAF, LATE_WEEKS = "bb", 2  # no bb rows in weeks 0-1, so both weeks are trimmed
+GAP_LEAF, GAP_WEEK = "cc", 10  # no cc row in week 10, so LOCF fills it
+TRUTHLESS_US_WEEKS = 2  # last two weeks lack US truth, so they leave the grid
+
+
+def synthetic_rows(seed: int = 0) -> list[dict]:
+    """Rows in the deaths.csv schema, plus decoy forecaster and ahead=1 rows."""
+    rng = np.random.default_rng(seed)
+    rows = []
+    for week in range(N_WEEKS):
+        target = START + pd.Timedelta(weeks=week)
+        leaf_truth = {
+            leaf: float(rng.poisson(50 * (i + 1))) for i, leaf in enumerate(LEAVES)
+        }
+        truth = {"us": sum(leaf_truth.values()), **leaf_truth}
+        for geo, value in truth.items():
+            if geo == LATE_LEAF and week < LATE_WEEKS:
+                continue
+            if geo == GAP_LEAF and week == GAP_WEEK:
+                continue
+            median = value * float(rng.uniform(0.8, 1.2))
+            truthless = geo == "us" and week >= N_WEEKS - TRUTHLESS_US_WEEKS
+            row = {
+                "ahead": 4,
+                "geo_value": geo,
+                "forecaster": FORECASTER,
+                "forecast_date": (target - pd.Timedelta(days=26)).date(),
+                "target_end_date": target.date(),
+                "forecast_0.25": median,
+                "actual": np.nan if truthless else value,
+            }
+            for level, column in zip(QUANTILE_LEVELS, QUANTILE_COLUMNS, strict=True):
+                row[column] = median * (1 + 1.5 * (level - 0.5))
+            rows.append(row)
+            rows.append(
+                {
+                    **row,
+                    "forecaster": "COVIDhub-baseline",
+                    **dict.fromkeys(QUANTILE_COLUMNS, -1.0),
+                }
+            )
+            rows.append({**row, "ahead": 1, **dict.fromkeys(QUANTILE_COLUMNS, -2.0)})
+    return rows
+
+
+ALT_FORECASTER = "synth-alt"
+DUP_FORECASTER = "synth-dup"
+SHORT_FORECASTER = "synth-short"
+SHORT_WEEKS = 8
+
+
+def panel_rows(seed: int = 0) -> list[dict]:
+    """``synthetic_rows`` plus three panel forecasters.
+
+    ``ALT_FORECASTER`` has every quantile x 1.1, ``DUP_FORECASTER`` copies
+    ``FORECASTER`` exactly, and ``SHORT_FORECASTER`` has only the last
+    ``SHORT_WEEKS`` target weeks.
+    """
+    rows = synthetic_rows(seed)
+    cutoff = START + pd.Timedelta(weeks=N_WEEKS - SHORT_WEEKS)
+    extra = []
+    for row in rows:
+        if row["forecaster"] != FORECASTER or row["ahead"] != 4:
+            continue
+        extra.append(
+            {
+                **row,
+                "forecaster": ALT_FORECASTER,
+                **{c: row[c] * 1.1 for c in QUANTILE_COLUMNS},
+            }
+        )
+        extra.append({**row, "forecaster": DUP_FORECASTER})
+        if pd.Timestamp(row["target_end_date"]) >= cutoff:
+            extra.append({**row, "forecaster": SHORT_FORECASTER})
+    return rows + extra
+
+
+def benchmark_rows() -> list[dict]:
+    """Small two-forecaster frame with canonical truth and one forecast gap."""
+    rows: list[dict] = []
+    dates = pd.date_range("2022-01-01", periods=3, freq="7D")
+    truth = {"us": (30.0, 33.0, 36.0), "aa": (10.0, 11.0, 12.0)}
+    for forecaster in (FORECASTER, ALT_FORECASTER):
+        for node, values in truth.items():
+            for index, (target, actual) in enumerate(zip(dates, values, strict=True)):
+                if forecaster == FORECASTER and node == "aa" and index == 1:
+                    continue
+                median = actual + (1.0 if forecaster == FORECASTER else 2.0)
+                rows.append(
+                    {
+                        "ahead": 4,
+                        "geo_value": node,
+                        "forecaster": forecaster,
+                        "forecast_date": target - pd.Timedelta(days=26),
+                        "target_end_date": target,
+                        "forecast_0.1": median - 2.0,
+                        "forecast_0.5": median,
+                        "forecast_0.9": median + 2.0,
+                        "actual": actual,
+                    }
+                )
+    return rows
+
+
+def _toml_value(value: object) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int | float):
+        return repr(value)
+    if isinstance(value, list | tuple):
+        return "[" + ", ".join(_toml_value(item) for item in value) + "]"
+    return '"' + str(value) + '"'
+
+
+def write_config(path: Path, values: dict) -> Path:
+    """Write a flat TOML file from ``values``."""
+    lines = [f"{key} = {_toml_value(value)}" for key, value in values.items()]
+    path.write_text("\n".join(lines) + "\n")
+    return path

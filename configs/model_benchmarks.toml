@@ -1,0 +1,45 @@
+# Pre-registered exploratory model benchmark; no unadjusted primary.
+# Do not launch this config until the whole-branch review and fix wave are clean.
+run_id = "model-benchmarks-v1"
+root_seed = 20261021
+data_path = "data/deaths.csv"
+expected_sha256 = "cb4dccfd21d6c08b1247aa9a7c6a8d93f7c373871526cfcb4860df884b54ac06"
+output_dir = "results"
+design = "benchmark"
+alpha = 0.2
+lr = 0.1
+lr_grid = [1.0, 0.5, 0.1, 0.05]
+Csat = 2.0
+KI = 1000.0
+T_burnin = 5
+ahead = 4
+reconcilers = ["none", "bottom_up", "mint_shrink", "mint_median"]
+controllers = ["raw", "pi"]
+mint_warmup = 20
+rolling_window = 10
+blocks = [8, 4, 12]
+n_boot = 2000
+min_eval_weeks = 60
+
+[benchmark]
+models = ["arima", "sarima", "deepar"]
+reference_model = "covidhub"
+reference_forecaster = "COVIDhub-4_week_ensemble"
+quantiles = [0.1, 0.5, 0.9]
+n_samples = 500
+min_train_weeks = 60
+refit_every = 1
+ahead = 4
+arima_order = [3, 0, 0]
+sarima_seasonal_order = [1, 0, 0, 52]
+deepar_model = "LSTM"
+deepar_input_chunk_length = 12
+deepar_training_length = 16
+deepar_hidden_dim = 25
+deepar_n_rnn_layers = 1
+deepar_dropout = 0.0
+deepar_batch_size = 32
+deepar_n_epochs = 10
+min_eval_weeks = 60
+forecast_seed_spawn_key = [0]
+evaluation_seed_spawn_key = [1]
