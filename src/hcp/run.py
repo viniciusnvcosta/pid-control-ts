@@ -17,6 +17,7 @@ moving-block resamples per block length, shared by every arm (paired, D12).
 import argparse
 import ctypes
 import errno
+import importlib.metadata
 import json
 import os
 import platform
@@ -27,9 +28,19 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import statsmodels
+from matplotlib import pyplot as plt
 
 # RunConfig, load_config and panel_config are re-exported as part of the run API.
-from hcp.config import RunConfig, config_manifest, load_config, panel_config
+from hcp.benchmark import BenchmarkResult, run_benchmark
+from hcp.benchmark_data import canonical_actuals, reference_bundle
+from hcp.benchmark_report import benchmark_figures
+from hcp.config import (
+    RunConfig,
+    benchmark_configs,
+    config_manifest,
+    load_config,
+    panel_config,
+)
 from hcp.data import (
     FORECASTER,
     build_bundles,
@@ -39,6 +50,7 @@ from hcp.data import (
 )
 from hcp.eligibility import EligibilityRule, eligibility, require_eligible
 from hcp.experiment import PRIMARY, ExperimentResult, run_experiment
+from hcp.forecast import generate_model_bundles
 from hcp.panel import PRIMARY as PANEL_PRIMARY
 from hcp.panel import PanelResult, run_panel
 from hcp.report import render_figures, render_panel_figures
@@ -193,6 +205,110 @@ def write_panel_artifacts(
     return out
 
 
+def write_benchmark_artifacts(
+    cfg: RunConfig,
+    result: BenchmarkResult,
+    forecast_diagnostics: dict,
+    input_sha256: str,
+) -> Path:
+    """Stage and atomically publish a complete model-benchmark result.
+
+    Args:
+        cfg: Validated benchmark run configuration.
+        result: Completed common-window benchmark result.
+        forecast_diagnostics: Fit, warning, timing, interpolation, and seed records.
+        input_sha256: SHA-256 of the source forecast file.
+
+    Returns:
+        Published result directory.
+
+    Raises:
+        FileExistsError: If the final or sibling staging directory already exists.
+        OSError: If atomic no-replace publication is unavailable or fails.
+    """
+    if cfg.design != "benchmark" or cfg.benchmark is None:
+        raise ValueError("write_benchmark_artifacts requires design 'benchmark'")
+    out = cfg.output_dir / cfg.run_id
+    if out.exists():
+        raise FileExistsError(f"{out} exists; choose a new run_id")
+    staging = out.with_name(f".{out.name}.partial")
+    staging.mkdir(parents=True, exist_ok=False)
+    tables = {
+        "base_forecasts": result.base_forecasts,
+        "intervals": result.intervals,
+        "metrics": result.metrics,
+        "level_metrics": result.level_metrics,
+        "hierarchy_contrasts": result.hierarchy_contrasts,
+        "model_contrasts": result.model_contrasts,
+    }
+    for name, frame in tables.items():
+        frame.to_parquet(staging / f"{name}.parquet", index=False)
+
+    figures_dir = staging / "figures"
+    figures_dir.mkdir()
+    figures = benchmark_figures(result, block=cfg.blocks[0], lr=cfg.lr)
+    try:
+        for name, figure in figures.items():
+            figure.savefig(figures_dir / f"{name}.pdf", bbox_inches="tight")
+    finally:
+        for figure in figures.values():
+            plt.close(figure)
+
+    settings = cfg.benchmark
+    manifest = _manifest(
+        cfg,
+        input_sha256,
+        primary={},
+        seed={
+            "root_seed": cfg.root_seed,
+            "forecast": forecast_diagnostics["seed"],
+            "evaluation": {
+                "root_seed": cfg.root_seed,
+                "spawn_key": list(settings.evaluation_seed_spawn_key),
+                "model_order": [*settings.models, settings.reference_model],
+                "block_order": list(cfg.blocks),
+            },
+        },
+        diagnostics={
+            "benchmark": result.diagnostics,
+            "forecast": forecast_diagnostics,
+        },
+    )
+    manifest["versions"].update(
+        {
+            "darts": importlib.metadata.version("darts"),
+            "torch": importlib.metadata.version("torch"),
+            "lightning": importlib.metadata.version("pytorch-lightning"),
+        }
+    )
+    manifest["execution"] = {
+        "device": "cpu",
+        "devices": 1,
+        "data_loader_workers": 0,
+        "deterministic_algorithms": True,
+    }
+    manifest["models"] = {
+        "classes": {
+            "arima": "darts.models.ARIMA",
+            "sarima": "darts.models.ARIMA",
+            "deepar": "darts.models.RNNModel",
+        },
+        "hyperparameters": config_manifest(cfg)["benchmark"],
+    }
+    manifest["limitations"] = {
+        "D15": (
+            "Evaluation and MinT errors use final revised truth rather than "
+            "as-of vintages."
+        )
+    }
+    manifest["analysis_note"] = "exploratory benchmark; no unadjusted primary"
+    (staging / "manifest.json").write_text(json.dumps(manifest, indent=2, default=str))
+    if out.exists():
+        raise FileExistsError(f"{out} exists; choose a new run_id")
+    _rename_noreplace(staging, out)
+    return out
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point; returns 0 on success."""
     parser = argparse.ArgumentParser(
@@ -204,7 +320,42 @@ def main(argv: list[str] | None = None) -> int:
         raise FileExistsError(
             f"{cfg.output_dir / cfg.run_id} exists; choose a new run_id"
         )
-    if cfg.design == "panel":
+    if cfg.design == "benchmark":
+        out_path = cfg.output_dir / cfg.run_id
+        staging = out_path.with_name(f".{out_path.name}.partial")
+        if staging.exists():
+            raise FileExistsError(f"{staging} exists; remove it or choose a new run_id")
+        digest = file_sha256(cfg.data_path)
+        if cfg.expected_sha256 is not None and digest != cfg.expected_sha256:
+            raise ValueError(
+                f"{cfg.data_path} has sha256 {digest}, expected {cfg.expected_sha256}"
+            )
+        frame = read_forecasts(cfg.data_path)
+        actuals = canonical_actuals(frame)
+        assert cfg.benchmark is not None
+        reference = reference_bundle(frame, actuals, cfg.benchmark.reference_forecaster)
+        forecast_cfg, evaluation_cfg = benchmark_configs(cfg)
+        generated = generate_model_bundles(
+            actuals,
+            reference.dates,
+            reference.forecast_dates,
+            forecast_cfg,
+        )
+        bundles = {
+            **generated.bundles,
+            cfg.benchmark.reference_model: reference,
+        }
+        result = run_benchmark(bundles, evaluation_cfg)
+        forecast_diagnostics = {
+            **generated.diagnostics,
+            "canonical_truth": {
+                "finite_disagreements": 0,
+                "observed_cells": int(actuals.observed.sum()),
+                "missing_cells": int((~actuals.observed).sum()),
+            },
+        }
+        out = write_benchmark_artifacts(cfg, result, forecast_diagnostics, digest)
+    elif cfg.design == "panel":
         frame = read_forecasts(cfg.data_path, cfg.expected_sha256)
         candidates = build_bundles(frame)
         if candidates.get(FORECASTER) is None:
