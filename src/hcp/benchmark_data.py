@@ -44,9 +44,12 @@ def canonical_actuals(frame: pd.DataFrame) -> ActualPanel:
     if ROOT not in nodes_present:
         raise ValueError(f"root series {ROOT!r} is missing")
     nodes = (ROOT, *sorted(nodes_present - {ROOT}))
+    reported = frame.loc[np.isfinite(frame["actual"])]
     dates = pd.DatetimeIndex(
-        pd.to_datetime(frame["target_end_date"]).unique()
+        pd.to_datetime(reported["target_end_date"]).unique()
     ).sort_values()
+    if dates.empty:
+        raise ValueError("canonical actuals require at least one finite truth value")
     if len(dates) > 1 and not np.all(
         np.diff(dates.to_numpy()) == np.timedelta64(7, "D")
     ):

@@ -41,6 +41,19 @@ def test_canonical_actuals_marks_unobserved_only_when_all_duplicates_nan() -> No
     assert panel.observed[:, :2].all()
 
 
+def test_canonical_actuals_ignores_dates_with_no_reported_truth() -> None:
+    frame = _frame()
+    trailing = frame.iloc[[0]].copy()
+    trailing["target_end_date"] = pd.Timestamp("2022-02-12")
+    trailing["actual"] = np.nan
+
+    panel = canonical_actuals(pd.concat([frame, trailing], ignore_index=True))
+
+    np.testing.assert_array_equal(
+        panel.dates, pd.date_range("2022-01-01", periods=3, freq="7D").to_numpy()
+    )
+
+
 def test_canonical_actuals_returns_read_only_arrays() -> None:
     panel = canonical_actuals(_frame())
 
