@@ -42,7 +42,11 @@ def longest_miss_run(hit: np.ndarray) -> int:
 def interval_score(
     y: np.ndarray, lo: np.ndarray, hi: np.ndarray, alpha: float
 ) -> np.ndarray:
-    """Gneiting-Raftery interval score of the central ``1 - alpha`` interval."""
+    """Central interval score, extended to crossed bounds as a quantile-pair score.
+
+    Retains the two-pinball-loss value for empty sets without sorting their
+    bounds. Signed spans remain in the formula, not physical set widths.
+    """
     below = (lo - y) * (y < lo)
     above = (y - hi) * (y > hi)
     return (hi - lo) + 2 / alpha * below + 2 / alpha * above
