@@ -2,46 +2,13 @@
 # ABOUTME: Converts prepared weekly histories into deterministic-seed predictive sample arrays without I/O.
 """Fixed probabilistic forecast-model adapters for benchmark generation."""
 
-from dataclasses import dataclass
-
 import numpy as np
 import pandas as pd
 from darts import TimeSeries
 from darts.models import ARIMA, RNNModel
 from darts.utils.likelihood_models import GaussianLikelihood
 
-
-@dataclass(frozen=True)
-class PreparedHistory:
-    """One model-ready weekly node history.
-
-    Attributes:
-        node: Hierarchy node key.
-        dates: Weekly observation dates with shape ``[T]``.
-        values: Finite observations with shape ``[T]``.
-    """
-
-    node: str
-    dates: np.ndarray
-    values: np.ndarray
-
-
-@dataclass(frozen=True)
-class ForecastSettings:
-    """Fixed hyperparameters shared by registered forecast adapters."""
-
-    ahead: int = 4
-    n_samples: int = 500
-    arima_order: tuple[int, int, int] = (3, 0, 0)
-    sarima_seasonal_order: tuple[int, int, int, int] = (1, 0, 0, 52)
-    deepar_model: str = "LSTM"
-    deepar_input_chunk_length: int = 12
-    deepar_training_length: int = 16
-    deepar_hidden_dim: int = 25
-    deepar_n_rnn_layers: int = 1
-    deepar_dropout: float = 0.0
-    deepar_batch_size: int = 32
-    deepar_n_epochs: int = 10
+from hcp.forecast_types import ForecastSettings, PreparedHistory
 
 
 def _seed_int(seed: np.random.SeedSequence) -> int:

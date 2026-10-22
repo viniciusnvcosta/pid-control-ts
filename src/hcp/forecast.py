@@ -20,6 +20,7 @@ from hcp.forecast_models import (
     deepar_samples,
     sarima_samples,
 )
+from hcp.forecast_types import DiagnosticsTables
 
 ForecastAdapter = Callable[
     [tuple[PreparedHistory, ...], ForecastSettings, np.random.SeedSequence],
@@ -75,6 +76,7 @@ class ForecastResult:
     bundles: dict[str, HierarchyBundle]
     base_forecasts: pd.DataFrame
     diagnostics: dict
+    tables: DiagnosticsTables = field(default_factory=DiagnosticsTables)
 
 
 def _weekly(name: str, values: np.ndarray) -> np.ndarray:
