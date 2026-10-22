@@ -1,6 +1,6 @@
 # Design: cumulative probabilistic model benchmarks v2
 
-Date: 2026-10-22. Status: written specification awaiting user review.
+Date: 2026-10-22. Status: approved by the user on 2026-10-22; implementation plan pending review.
 Study identity: `model-benchmarks-v2`.
 
 ## 1. Intent, evidence status, and scope
