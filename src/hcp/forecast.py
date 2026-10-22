@@ -132,7 +132,16 @@ def _prepare_origin(
             return None
         dates.setflags(write=False)
         filled.setflags(write=False)
-        histories.append(PreparedHistory(node=node, dates=dates, values=filled))
+        histories.append(
+            PreparedHistory(
+                node=node,
+                dates=dates,
+                values=filled,
+                raw_values=values,
+                observed=actuals.observed[row, prefix][start:],
+                forecast_dates=dates - np.timedelta64(26, "D"),
+            )
+        )
         records.append(
             {
                 "node": node,
