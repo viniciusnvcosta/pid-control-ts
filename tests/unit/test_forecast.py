@@ -249,3 +249,28 @@ def test_outputs_are_read_only_with_exact_long_columns(monkeypatch) -> None:
         "q_med",
         "q_hi",
     ]
+
+
+def test_legacy_results_gain_independent_schema_bearing_diagnostic_tables() -> None:
+    from hcp.forecast import ForecastResult
+    from hcp.forecast_types import DiagnosticsTables
+
+    diagnostics = {"legacy": "preserved"}
+    first = ForecastResult(
+        bundles={}, base_forecasts=pd.DataFrame(), diagnostics=diagnostics
+    )
+    second = ForecastResult(bundles={}, base_forecasts=pd.DataFrame(), diagnostics={})
+    assert first.diagnostics is diagnostics
+    assert isinstance(first.tables, DiagnosticsTables)
+    for name in ("forecast_diagnostics", "tuning", "quantile_repairs", "warnings"):
+        table = getattr(first.tables, name)
+        assert table.empty
+        assert list(table) == ["model", "node", "forecast_date"]
+        table.loc[0] = ["arima", "us", pd.Timestamp("2020-01-04")]
+        assert getattr(second.tables, name).empty
+    source = pd.DataFrame(
+        {"model": ["qr_l1"], "node": ["us"], "forecast_date": ["2020-01-04"]}
+    )
+    tables = DiagnosticsTables(tuning=source)
+    source.loc[0, "model"] = "changed"
+    assert tables.tuning.loc[0, "model"] == "qr_l1"
