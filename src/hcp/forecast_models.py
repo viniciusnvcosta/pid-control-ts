@@ -5,79 +5,15 @@
 import numpy as np
 import pandas as pd
 from darts import TimeSeries
-from darts.models import ARIMA, RNNModel
+from darts.models import RNNModel
 from darts.utils.likelihood_models import GaussianLikelihood
 
+from hcp.forecast_classical import arima_samples, sarima_samples  # noqa: F401
 from hcp.forecast_types import ForecastSettings, PreparedHistory
 
 
 def _seed_int(seed: np.random.SeedSequence) -> int:
     return int(seed.generate_state(1, dtype=np.uint32)[0])
-
-
-def _classical_samples(
-    histories: tuple[PreparedHistory, ...],
-    settings: ForecastSettings,
-    seed: np.random.SeedSequence,
-    *,
-    seasonal_order: tuple[int, int, int, int],
-) -> np.ndarray:
-    samples = []
-    p, d, q = settings.arima_order
-    for history, child in zip(histories, seed.spawn(len(histories)), strict=True):
-        random_state = _seed_int(child)
-        series = TimeSeries.from_times_and_values(
-            pd.DatetimeIndex(history.dates), history.values
-        )
-        model = ARIMA(
-            p=p,
-            d=d,
-            q=q,
-            seasonal_order=seasonal_order,
-            random_state=random_state,
-        )
-        model.fit(series)
-        predicted = model.predict(
-            settings.ahead,
-            num_samples=settings.n_samples,
-            random_state=random_state,
-        ).all_values(copy=False)
-        expected = (settings.ahead, 1, settings.n_samples)
-        if predicted.shape != expected:
-            raise ValueError(
-                f"{history.node} returned samples with shape {predicted.shape}, "
-                f"expected {expected}"
-            )
-        node_samples = predicted[:, 0, :]
-        if not np.isfinite(node_samples).all():
-            raise ValueError(f"{history.node} returned non-finite forecast samples")
-        samples.append(node_samples)
-    result = np.stack(samples, axis=0)
-    result.setflags(write=False)
-    return result
-
-
-def arima_samples(
-    histories: tuple[PreparedHistory, ...],
-    settings: ForecastSettings,
-    seed: np.random.SeedSequence,
-) -> np.ndarray:
-    """Fit independent ARIMA(3,0,0) models and return predictive samples."""
-    return _classical_samples(histories, settings, seed, seasonal_order=(0, 0, 0, 0))
-
-
-def sarima_samples(
-    histories: tuple[PreparedHistory, ...],
-    settings: ForecastSettings,
-    seed: np.random.SeedSequence,
-) -> np.ndarray:
-    """Fit independent fixed annual SARIMA models and return predictive samples."""
-    return _classical_samples(
-        histories,
-        settings,
-        seed,
-        seasonal_order=settings.sarima_seasonal_order,
-    )
 
 
 def deepar_samples(
