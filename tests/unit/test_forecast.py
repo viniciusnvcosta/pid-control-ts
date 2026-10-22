@@ -274,3 +274,48 @@ def test_legacy_results_gain_independent_schema_bearing_diagnostic_tables() -> N
     tables = DiagnosticsTables(tuning=source)
     source.loc[0, "model"] = "changed"
     assert tables.tuning.loc[0, "model"] == "qr_l1"
+
+
+def test_ineligible_origins_reserve_seed_slots(monkeypatch) -> None:
+    from hcp.forecast_validation import neural_seed_streams
+
+    panel = _panel()
+    dates, forecast_dates = _grid(panel, 62, 66)
+
+    def adapter(histories, settings, seed):
+        streams = neural_seed_streams(seed, 1)
+        value = np.random.default_rng(streams["prediction"][0]).normal()
+        return np.full((len(histories), settings.ahead, settings.n_samples), value)
+
+    monkeypatch.setitem(FORECASTERS, "literal", adapter)
+    original = generate_model_bundles(panel, dates, forecast_dates, _config())
+    raw = panel.y.copy()
+    raw[:, 0] = np.nan  # Origin 63 becomes ineligible; origin 64 retains its stream.
+    raw[:, 63:] += 100000  # Future values are invisible to all these fits.
+    changed = replace(panel, y=raw, observed=np.isfinite(raw))
+    rerun = generate_model_bundles(changed, dates, forecast_dates, _config())
+    assert np.isnan(original.bundles["literal"].q[:, 0]).all()
+    assert np.isfinite(original.bundles["literal"].q[:, 1]).all()
+    assert np.isnan(rerun.bundles["literal"].q[:, :2]).all()
+    np.testing.assert_array_equal(
+        original.bundles["literal"].q[:, 2:], rerun.bundles["literal"].q[:, 2:]
+    )
+
+
+def test_outer_history_preserves_raw_metadata_before_interpolation(monkeypatch) -> None:
+    panel = _panel(gaps=True)
+    dates, forecast_dates = _grid(panel, 64, 65)
+
+    def adapter(histories, settings, seed):
+        history = histories[1]
+        assert history.raw_values is not None
+        assert np.isnan(history.raw_values[9])
+        assert history.values[9] == 20.0
+        assert not history.observed[9]
+        np.testing.assert_array_equal(
+            history.forecast_dates, history.dates - np.timedelta64(26, "D")
+        )
+        return _literal_adapter(histories, settings, seed)
+
+    monkeypatch.setitem(FORECASTERS, "literal", adapter)
+    generate_model_bundles(panel, dates, forecast_dates, _config())
