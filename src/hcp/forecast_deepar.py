@@ -19,9 +19,15 @@ from hcp.forecast_deepar_data import (
     weighted_window_sampler,
 )
 from hcp.forecast_deepar_rollout import recurrent_rollout
-from hcp.forecast_neural_validation import gaussian_mixture_nll
-from hcp.forecast_types import PreparedHistory, V2ModelSettings
-from hcp.forecast_validation import TemporalSplit, neural_split, prepare_prefix
+from hcp.forecast_neural_validation import gaussian_mixture_nll, select_neural
+from hcp.forecast_types import NativePrediction, PreparedHistory, V2ModelSettings
+from hcp.forecast_validation import (
+    TemporalSplit,
+    neural_seed_streams,
+    neural_split,
+    prepare_prefix,
+)
+from hcp.forecast_warnings import ForecastWarnings, WarningCandidate
 
 
 class EnhancedRNNModule(CustomRNNModule):
@@ -38,6 +44,7 @@ class EnhancedRNNModule(CustomRNNModule):
             input_chunk_length=12,
             output_chunk_length=1,
             likelihood=GaussianLikelihood(),
+            loss_fn=nn.MSELoss(),  # Darts' mutable default would leak eval mode.
             optimizer_kwargs={"lr": learning_rate},
         )
         self.embedding = nn.Embedding(n_nodes, 20)
@@ -85,29 +92,7 @@ class EnhancedCandidate:
             raise ValueError(
                 "enhanced candidate requires histories and a registered width"
             )
-        first = histories[0]
-        common_length = min(len(h.dates) for h in histories)
-        if not common_length or any(
-            h.observed is None or h.forecast_dates is None for h in histories
-        ):
-            raise ValueError("enhanced candidate requires nonempty raw metadata")
-        # Align only the shared holdout calendar. Keep each node's complete
-        # available prefix for age, scaling, and its own number of windows.
-        dates = first.dates[-common_length:]
-        cutoffs = first.forecast_dates[-common_length:]
-        if any(
-            not np.array_equal(h.dates[-common_length:], dates)
-            or not np.array_equal(h.forecast_dates[-common_length:], cutoffs)
-            for h in histories
-        ):
-            raise ValueError(
-                "enhanced histories must share the trailing weekly calendar"
-            )
-        split = neural_split(
-            dates, np.stack([h.observed[-common_length:] for h in histories]), cutoffs
-        )
-        if split is None:
-            raise ValueError("enhanced candidate requires an eligible neural split")
+        split = _enhanced_split(histories)
         self.histories, self.settings, self.width = tuple(histories), settings, width
         self.best_state: dict[str, torch.Tensor] | None = None
         self._build(split.training_cutoff, seed)
@@ -244,3 +229,129 @@ def make_enhanced_candidate(
         A candidate supporting selection, full refit, and seeded native prediction.
     """
     return EnhancedCandidate(histories, settings, width, seed)
+
+
+def _enhanced_split(histories: tuple[PreparedHistory, ...]) -> TemporalSplit:
+    if not histories:
+        raise ValueError("enhanced forecast requires nonempty histories")
+    first = histories[0]
+    common_length = min(len(h.dates) for h in histories)
+    if not common_length or any(
+        h.observed is None or h.forecast_dates is None for h in histories
+    ):
+        raise ValueError("enhanced candidate requires nonempty raw metadata")
+    # Align only the shared holdout calendar. Keep each node's complete
+    # available prefix for age, scaling, and its own number of windows.
+    dates = first.dates[-common_length:]
+    cutoffs = first.forecast_dates[-common_length:]
+    if any(
+        not np.array_equal(h.dates[-common_length:], dates)
+        or not np.array_equal(h.forecast_dates[-common_length:], cutoffs)
+        for h in histories
+    ):
+        raise ValueError("enhanced histories must share the trailing weekly calendar")
+    split = neural_split(
+        dates, np.stack([h.observed[-common_length:] for h in histories]), cutoffs
+    )
+    if split is None:
+        raise ValueError("enhanced candidate requires an eligible neural split")
+    return split
+
+
+def _fit_diagnostics(candidate: EnhancedCandidate) -> dict:
+    return {
+        "scales": candidate.scales.copy(),
+        "covariates": tuple(
+            {"first_date": t.first_date, "mean": t.mean.copy(), "scale": t.scale.copy()}
+            for t in candidate.transforms
+        ),
+    }
+
+
+def enhanced_deepar_prediction(
+    histories: tuple[PreparedHistory, ...],
+    settings: V2ModelSettings,
+    seed: np.random.SeedSequence,
+) -> NativePrediction:
+    """Select a recurrent width/epoch and forecast from an independent full refit.
+
+    Args:
+        histories: Raw available prefixes in fixed hierarchy vocabulary order.
+            Synthetic fixtures may use fewer nodes than the registered 57.
+        settings: Model defaults or explicitly reduced development budgets.
+        seed: Reserved model/origin seed, allocated once into 2*N+2 children.
+
+    Returns:
+        Protected native paths and candidate, refit, stream, and warning evidence.
+        Diagnostic forecast_date is the shared last observation plus two days,
+        the registered issuance cutoff for the next fourth-step target.
+
+    Raises:
+        ValueError: If histories, widths, split, or prediction payload are invalid.
+        Exception: Candidate failures abort; the same exception carries immutable
+            forecast_diagnostics including all warnings observed through failure.
+    """
+    split = _enhanced_split(histories)
+    widths = tuple(sorted(settings.enhanced_hidden_dims))
+    if not widths or len(set(widths)) != len(widths):
+        raise ValueError("enhanced widths must be nonempty and unique")
+    streams = neural_seed_streams(seed, len(widths))
+    origin = histories[0].dates[-1] + np.timedelta64(2, "D")
+    collector = ForecastWarnings("deepar_enhanced", origin)
+    diagnostics = {
+        "model": "deepar_enhanced",
+        "forecast_date": origin,
+        "streams": {
+            key: tuple(child.spawn_key for child in children)
+            for key, children in streams.items()
+        },
+        "tuning": [],
+    }
+    candidates, inner = [], []
+    try:
+        for width, training_child in zip(widths, streams["training"], strict=True):
+            with collector.capture(width, "construction"):
+                candidate = make_enhanced_candidate(
+                    histories, settings, width, training_child
+                )
+            candidates.append(candidate)
+            inner.append(_fit_diagnostics(candidate))
+        selected = select_neural(
+            tuple(
+                WarningCandidate(c, w, collector) for c, w in zip(candidates, widths)
+            ),
+            split,
+            seed,
+            max_epochs=settings.neural_max_epochs,
+            patience=settings.neural_patience,
+            streams=streams,
+        )
+        diagnostics["tuning"] = [
+            {**row, "width": widths[index], **inner[index]}
+            for index, row in enumerate(selected.tuning.to_dict("records"))
+        ]
+        winner = candidates[selected.candidate]
+        width = widths[selected.candidate]
+        diagnostics["final_fit"] = {
+            "width": width,
+            "epochs": winner.epochs_trained,
+            "best_epoch": selected.best_epoch,
+            "best_nll": selected.best_nll,
+            **_fit_diagnostics(winner),
+        }
+        with collector.capture(width, "prediction"):
+            samples = winner.predict_samples(streams["prediction"][0])
+        if np.shape(samples) != (len(histories), 4, settings.n_samples):
+            raise ValueError(
+                "enhanced prediction must match nodes, four steps, and sample budget"
+            )
+        return NativePrediction(
+            tuple(h.node for h in histories),
+            settings.ahead,
+            "samples",
+            samples=samples,
+            diagnostics={**diagnostics, **collector.diagnostics()},
+        )
+    except Exception as error:
+        collector.attach(error, diagnostics)
+        raise
