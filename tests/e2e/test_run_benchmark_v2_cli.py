@@ -29,21 +29,22 @@ MODELS = (
 def test_v2_cli_writes_all_models_cells_tables_and_manifest(
     tmp_path: Path, monkeypatch
 ) -> None:
-    input_path = tmp_path / "synthetic.csv"
-    input_path.write_text("synthetic")
     file_hashes = {
-        "synthetic.csv": "b" * 64,
+        "deaths.csv": "cb4dccfd21d6c08b1247aa9a7c6a8d93f7c373871526cfcb4860df884b54ac06",
         "model_benchmarks_v2.toml": "c" * 64,
         "uv.lock": "d" * 64,
     }
     cfg = RunConfig(
-        run_id="synthetic-v2",
+        run_id="model-benchmarks-v2",
         root_seed=20261021,
-        data_path=input_path,
+        data_path=Path("data/deaths.csv"),
         output_dir=tmp_path / "results",
+        expected_sha256="cb4dccfd21d6c08b1247aa9a7c6a8d93f7c373871526cfcb4860df884b54ac06",
         design="benchmark",
         controllers=("raw", "pi", "pi_norm"),
         reconcilers=("none", "bottom_up", "mint_shrink", "mint_median"),
+        lr=0.1,
+        lr_grid=(0.1,),
         benchmark={"protocol_version": 2},
     )
     monkeypatch.setattr(run_module, "load_config", lambda path: cfg)

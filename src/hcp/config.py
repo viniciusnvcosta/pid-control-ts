@@ -187,6 +187,33 @@ class RunConfig:
                 raise ValueError(
                     "run and benchmark minimum evaluation weeks must match"
                 )
+            if isinstance(self.benchmark, BenchmarkV2Settings):
+                registered = {
+                    "run_id": "model-benchmarks-v2",
+                    "root_seed": 20261021,
+                    "data_path": Path("data/deaths.csv"),
+                    "expected_sha256": "cb4dccfd21d6c08b1247aa9a7c6a8d93f7c373871526cfcb4860df884b54ac06",
+                    "alpha": 0.2,
+                    "lr": 0.1,
+                    "lr_grid": (0.1,),
+                    "Csat": 2.0,
+                    "KI": 1000.0,
+                    "T_burnin": 5,
+                    "ahead": 4,
+                    "reconcilers": expected_reconcilers,
+                    "controllers": ("raw", "pi", "pi_norm"),
+                    "mint_warmup": 20,
+                    "rolling_window": 10,
+                    "blocks": (8, 4, 12),
+                    "n_boot": 2000,
+                    "min_eval_weeks": 60,
+                }
+                for name, expected in registered.items():
+                    if getattr(self, name) != expected:
+                        raise ValueError(
+                            f"v2 {name} must be fixed at {expected!r}, "
+                            f"got {getattr(self, name)!r}"
+                        )
         if "none" not in self.reconcilers:
             raise ValueError("reconcilers must include the 'none' control")
         if unknown := set(self.reconcilers) - set(RECONCILERS):

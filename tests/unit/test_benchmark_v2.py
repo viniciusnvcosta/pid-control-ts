@@ -127,6 +127,25 @@ def test_v2_fixed_pi_scales_ignore_evaluation_truth(monkeypatch) -> None:
     bundles = _bundles(90)
     actuals = _actuals(bundles)
     result = run_benchmark(bundles, _config(), actuals=actuals)
+    assert set(result.metrics["role"]) == {"principal", "descriptive"}
+    assert set(result.level_metrics["role"]) == {"principal", "descriptive"}
+    principal_cells = set(
+        result.metrics.loc[result.metrics["role"] == "principal"]
+        .groupby(["reconciler", "controller"])
+        .groups
+    )
+    assert principal_cells == {
+        ("none", "raw"),
+        ("none", "pi_norm"),
+        ("mint_median", "raw"),
+        ("mint_median", "pi_norm"),
+    }
+    assert (
+        result.metrics.groupby("model")["role"]
+        .apply(lambda roles: (roles == "principal").sum())
+        .eq(4 * len(NODES))
+        .all()
+    )
     cells = result.metrics[
         ["model", "reconciler", "controller", "lr"]
     ].drop_duplicates()

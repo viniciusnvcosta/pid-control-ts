@@ -52,3 +52,30 @@ def test_invalid_v2_arms_and_root_seed_fail_before_forecasting() -> None:
         replace(cfg, controllers=("raw", "pi"))
     with pytest.raises(ValueError, match="root_seed"):
         benchmark_configs(replace(cfg, root_seed=1))
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("run_id", "other-id"),
+        ("data_path", ROOT_DIR / "data/other.csv"),
+        ("expected_sha256", "0" * 64),
+        ("root_seed", 20261022),
+        ("alpha", 0.1),
+        ("lr", 0.05),
+        ("lr_grid", (0.1, 0.05)),
+        ("Csat", 3.0),
+        ("KI", 999.0),
+        ("T_burnin", 6),
+        ("ahead", 5),
+        ("mint_warmup", 21),
+        ("rolling_window", 11),
+        ("blocks", (4, 8, 12)),
+        ("n_boot", 1999),
+        ("min_eval_weeks", 61),
+    ],
+)
+def test_v2_rejects_changed_registered_protocol_constants(field, value) -> None:
+    cfg = load_config(ROOT_DIR / "configs/model_benchmarks_v2.toml")
+    with pytest.raises(ValueError):
+        replace(cfg, **{field: value})

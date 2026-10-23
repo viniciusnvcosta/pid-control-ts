@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 
 from hcp.benchmark_data import ActualPanel
-from hcp.benchmark_stats import v2_contrast_tables
+from hcp.benchmark_stats import ARM_CELLS, v2_contrast_tables
 from hcp.conformal import fixed_pi_scales
 from hcp.data import ROOT, TERRITORIES, HierarchyBundle
 from hcp.forecast_preparation import _prepare_origin
@@ -377,13 +377,22 @@ def _v2_metric_frames(
     """Build per-node and descriptive level metrics including v2 endpoints."""
     scale = node_scale(arms.y)
     metric_rows, level_rows = [], []
+    principal_arms = {
+        (*arm, RAW_LR if arm[1] == "raw" else 0.1) for arm in ARM_CELLS.values()
+    }
     for (reconciler, controller, lr), (lo, hi) in arms.intervals.items():
         values = v2_node_metrics(arms.y, lo, hi, scale, alpha=alpha, window=window)
+        role = (
+            "principal"
+            if (reconciler, controller, lr) in principal_arms
+            else "descriptive"
+        )
         for node_index, node in enumerate(arms.nodes):
             metric_rows.append(
                 {
                     "model": model,
                     "node": node,
+                    "role": role,
                     "reconciler": reconciler,
                     "controller": controller,
                     "lr": lr,
@@ -400,6 +409,7 @@ def _v2_metric_frames(
                 {
                     "model": model,
                     "level": level,
+                    "role": role,
                     "reconciler": reconciler,
                     "controller": controller,
                     "lr": lr,

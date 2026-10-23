@@ -146,6 +146,7 @@ class TransformerCandidate:
         settings: V2ModelSettings,
         seed: np.random.SeedSequence,
     ):
+        histories = _trim_unavailable_tail(histories)
         if not histories:
             raise ValueError("Transformer requires nonempty histories")
         self.histories, self.settings = tuple(histories), settings
@@ -270,6 +271,7 @@ def transformer_prediction(
     seed: np.random.SeedSequence,
 ) -> NativePrediction:
     """Select/refit the fixed global Transformer and return seeded native paths."""
+    histories = _trim_unavailable_tail(histories)
     first = histories[0]
     split = _split(histories)
     streams = neural_seed_streams(seed, 1)
@@ -336,6 +338,31 @@ def transformer_prediction(
     except Exception as error:
         warnings.attach(error, {})
         raise
+
+
+def _trim_unavailable_tail(
+    histories: tuple[PreparedHistory, ...],
+) -> tuple[PreparedHistory, ...]:
+    """Remove dates after the last target observed for every Transformer node."""
+    if not histories:
+        raise ValueError("Transformer requires nonempty histories")
+    last_available = min(
+        int(np.flatnonzero(history.observed)[-1])
+        for history in histories
+        if np.any(history.observed)
+    )
+    stop = last_available + 1
+    return tuple(
+        PreparedHistory(
+            history.node,
+            history.dates[:stop],
+            history.values[:stop],
+            history.raw_values[:stop],
+            history.observed[:stop],
+            history.forecast_dates[:stop],
+        )
+        for history in histories
+    )
 
 
 def _trainer():
