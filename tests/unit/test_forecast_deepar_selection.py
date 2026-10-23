@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 
 from hcp import forecast_deepar as adapter
+from hcp.benchmark_batch import NeuralExecution
 from hcp.forecast_types import PreparedHistory, V2ModelSettings
 
 
@@ -88,7 +89,7 @@ class TrainingBoundary:
 def install_boundary(monkeypatch, fail=None):
     events = []
 
-    def factory(hs, settings, width, child):
+    def factory(hs, settings, width, child, execution):
         return TrainingBoundary(hs, settings, width, child, events, fail)
 
     monkeypatch.setattr(adapter, "make_enhanced_candidate", factory)
@@ -98,7 +99,7 @@ def install_boundary(monkeypatch, fail=None):
 def predict(hs, settings, seed):
     implementation = getattr(adapter, "enhanced_deepar_prediction", None)
     assert callable(implementation), "enhanced outer adapter must exist"
-    return implementation(hs, settings, seed)
+    return implementation(hs, settings, seed, NeuralExecution.cpu())
 
 
 def test_default_budget_selects_epoch_and_full_refit_with_exact_streams(monkeypatch):
@@ -201,7 +202,7 @@ def test_default_maximum_runs_100_improving_epochs(monkeypatch):
 def test_constructor_failure_preserves_original_exception_and_warning(monkeypatch):
     failure = LookupError("construction failed")
 
-    def failing_factory(hs, settings, width, child):
+    def failing_factory(hs, settings, width, child, execution):
         warnings.warn("constructor warning", FutureWarning)
         raise failure
 

@@ -64,9 +64,9 @@ def test_reduced_real_benchmark_preserves_cutoff_alignment_and_coherence(
     histories_seen = []
     real_arima = FORECASTERS["arima"]
 
-    def recording_arima(histories, adapter_settings, seed):
+    def recording_arima(histories, adapter_settings, seed, execution):
         histories_seen.extend(histories)
-        return real_arima(histories, adapter_settings, seed)
+        return real_arima(histories, adapter_settings, seed, execution)
 
     monkeypatch.setitem(FORECASTERS, "arima", recording_arima)
     generated = generate_model_bundles(actuals, targets, origins, forecast_cfg)

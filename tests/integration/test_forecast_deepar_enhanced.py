@@ -8,6 +8,7 @@ from dataclasses import replace
 import numpy as np
 import pytest
 
+from hcp.benchmark_batch import NeuralExecution
 from hcp.forecast_deepar import enhanced_deepar_prediction
 from hcp.forecast_types import PreparedHistory, V2ModelSettings
 from hcp.forecast_validation import prepare_prefix
@@ -39,7 +40,10 @@ def test_real_57_node_paths_repeat_and_ignore_unavailable_future(record_property
     )
     predictions = [
         enhanced_deepar_prediction(
-            _available_histories(shift), settings, np.random.SeedSequence(71)
+            _available_histories(shift),
+            settings,
+            np.random.SeedSequence(71),
+            NeuralExecution.cpu(),
         )
         for shift in (0.0, 0.0, 1000000.0)
     ]
@@ -82,3 +86,51 @@ def test_real_57_node_paths_repeat_and_ignore_unavailable_future(record_property
             default=str,
         ),
     )
+
+
+def test_real_cuda_enhanced_repeatability_and_evidence(monkeypatch):
+    import torch
+
+    from hcp import forecast_deepar
+
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA unavailable")
+    execution = NeuralExecution(
+        "cuda:0", "NVIDIA GeForce RTX 4080", ":4096:8", False, "32-true"
+    )
+    torch.use_deterministic_algorithms(True, warn_only=False)
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+    devices = []
+    forward = forecast_deepar.EnhancedRNNModule.forward
+
+    def record_forward(module, inputs, *args, **kwargs):
+        devices.append(str(inputs[0].device))
+        return forward(module, inputs, *args, **kwargs)
+
+    monkeypatch.setattr(forecast_deepar.EnhancedRNNModule, "forward", record_forward)
+    settings = replace(
+        V2ModelSettings(), neural_max_epochs=1, neural_patience=1, n_samples=8
+    )
+    outputs = [
+        enhanced_deepar_prediction(
+            _available_histories()[:2], settings, np.random.SeedSequence(71), execution
+        )
+        for _ in range(2)
+    ]
+    left, right = outputs
+    np.testing.assert_array_equal(left.samples, right.samples)
+    assert left.diagnostics["streams"] == right.diagnostics["streams"]
+    assert left.diagnostics["warning_counts"] == right.diagnostics["warning_counts"]
+    for a, b in zip(
+        left.diagnostics["tuning"], right.diagnostics["tuning"], strict=True
+    ):
+        assert a.keys() == b.keys()
+        for key in a:
+            if key == "covariates":
+                for ca, cb in zip(a[key], b[key], strict=True):
+                    for field in ca:
+                        np.testing.assert_array_equal(ca[field], cb[field])
+            else:
+                np.testing.assert_array_equal(a[key], b[key])
+    assert devices and set(devices) == {"cuda:0"}

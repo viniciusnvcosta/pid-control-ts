@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 import torch
 
+from hcp.benchmark_batch import NeuralExecution
 from hcp.forecast_types import PreparedHistory, V2ModelSettings, prediction_quantiles
 from hcp.forecast_validation import neural_split, prepare_prefix
 
@@ -55,7 +56,10 @@ def test_real_transformer_repeatability_future_invariance_and_fourth_step(
     assert not changed_histories[0].observed[40:].any()
     results = [
         neural.transformer_prediction(
-            _histories(shift), settings, np.random.SeedSequence(81)
+            _histories(shift),
+            settings,
+            np.random.SeedSequence(81),
+            NeuralExecution.cpu(),
         )
         for shift in (0.0, 0.0, 1e6)
     ]
@@ -87,7 +91,7 @@ def test_real_two_epochs_preserve_adam_and_best_weights_and_score_direct_gaussia
     neural = _module()
     data = _histories()
     candidate = neural.TransformerCandidate(
-        data, V2ModelSettings(), np.random.SeedSequence(82)
+        data, V2ModelSettings(), np.random.SeedSequence(82), NeuralExecution.cpu()
     )
     data = candidate.histories
     candidate.train_epoch()
@@ -115,7 +119,9 @@ def test_real_two_epochs_preserve_adam_and_best_weights_and_score_direct_gaussia
     from darts import TimeSeries
 
     series = [
-        TimeSeries.from_times_and_values(pd.DatetimeIndex(h.dates), h.values / scale)
+        TimeSeries.from_times_and_values(
+            pd.DatetimeIndex(h.dates), (h.values / scale).astype(np.float32)
+        )
         for h, scale in zip(contexts, candidate.scales, strict=True)
     ]
     forecasts = candidate.model.predict(
@@ -137,3 +143,43 @@ def test_real_two_epochs_preserve_adam_and_best_weights_and_score_direct_gaussia
         np.testing.assert_allclose(losses[i, 0], expected)
     changed = candidate.fourth_step_nll(split, np.random.SeedSequence(84))
     np.testing.assert_array_equal(losses, changed)  # no sampling or inference dropout
+
+
+def test_real_cuda_transformer_repeatability_and_evidence(monkeypatch):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA unavailable")
+    neural = _module()
+    execution = NeuralExecution(
+        "cuda:0", "NVIDIA GeForce RTX 4080", ":4096:8", False, "32-true"
+    )
+    torch.use_deterministic_algorithms(True, warn_only=False)
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+    devices = []
+    forward = neural._PersistentTransformerModule.forward
+
+    def record_forward(module, inputs, *args, **kwargs):
+        devices.append(str(inputs[0].device))
+        return forward(module, inputs, *args, **kwargs)
+
+    monkeypatch.setattr(neural._PersistentTransformerModule, "forward", record_forward)
+    settings = replace(
+        V2ModelSettings(), neural_max_epochs=1, neural_patience=1, n_samples=8
+    )
+    outputs = [
+        neural.transformer_prediction(
+            _histories(), settings, np.random.SeedSequence(81), execution
+        )
+        for _ in range(2)
+    ]
+    left, right = outputs
+    np.testing.assert_array_equal(left.samples, right.samples)
+    assert left.diagnostics["streams"] == right.diagnostics["streams"]
+    assert left.diagnostics["warning_counts"] == right.diagnostics["warning_counts"]
+    for a, b in zip(
+        left.diagnostics["tuning"], right.diagnostics["tuning"], strict=True
+    ):
+        assert a.keys() == b.keys()
+        for key in a:
+            np.testing.assert_array_equal(a[key], b[key])
+    assert devices and set(devices) == {"cuda:0"}

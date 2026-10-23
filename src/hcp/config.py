@@ -304,6 +304,7 @@ def benchmark_configs(cfg: RunConfig) -> tuple[ForecastConfig, BenchmarkConfig]:
             settings=settings.model_settings,
             protocol_version=2,
             v2_settings=settings.model_settings,
+            execution=settings.execution,
         )
         panel = replace(panel_config(cfg), primary_forecaster=settings.reference_model)
         benchmark = BenchmarkConfig(

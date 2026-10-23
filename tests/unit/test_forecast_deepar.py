@@ -11,6 +11,7 @@ import numpy as np
 import pytest
 import torch
 
+from hcp.benchmark_batch import NeuralExecution
 from hcp.forecast_types import PreparedHistory, V2ModelSettings
 from hcp.forecast_validation import neural_split
 
@@ -67,6 +68,7 @@ def candidate(seed=7):
         replace(V2ModelSettings(), n_samples=8),
         40,
         np.random.SeedSequence(seed),
+        NeuralExecution.cpu(),
     )
 
 
@@ -181,7 +183,7 @@ def test_gaussian_location_scale_and_draws_restore_identical_native_units():
     model = candidate()
     rollout = importlib.import_module("hcp.forecast_deepar_rollout").recurrent_rollout
     args = (model.module, model.prefixes, model.transforms, model.scales, 8)
-    ordinary = rollout(*args, np.random.SeedSequence(91))
+    ordinary = rollout(*args, np.random.SeedSequence(91), NeuralExecution.cpu())
     doubled_contexts = tuple(replace(h, values=h.values * 2) for h in model.prefixes)
     doubled = rollout(
         model.module,
@@ -190,6 +192,7 @@ def test_gaussian_location_scale_and_draws_restore_identical_native_units():
         model.scales * 2,
         8,
         np.random.SeedSequence(91),
+        NeuralExecution.cpu(),
     )
     for actual, original in zip(doubled, ordinary, strict=True):
         np.testing.assert_allclose(actual, original * 2, rtol=0, atol=0)
@@ -207,7 +210,11 @@ def test_unavailable_values_cannot_change_inner_preprocessing_or_first_origin_ro
         # Incorrectly full-imputed model-ready values must be ignored entirely.
         changed.append(replace(h, raw_values=raw, values=np.full(40, -999.0)))
     other = components().make_enhanced_candidate(
-        tuple(changed), model.settings, 40, np.random.SeedSequence(7)
+        tuple(changed),
+        model.settings,
+        40,
+        np.random.SeedSequence(7),
+        NeuralExecution.cpu(),
     )
     np.testing.assert_array_equal(model.scales, other.scales)
     for a, b in zip(model.dataset.targets, other.dataset.targets, strict=True):
@@ -268,6 +275,7 @@ def test_unequal_node_starts_keep_full_training_prefixes_and_correct_sampler_mas
         replace(V2ModelSettings(), n_samples=8),
         40,
         np.random.SeedSequence(9),
+        NeuralExecution.cpu(),
     )
     assert [len(h.values) for h in model.prefixes] == [28, 23]
     np.testing.assert_array_equal(model.dataset.window_counts, [12, 7])

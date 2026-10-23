@@ -11,6 +11,7 @@ import torch
 from darts import TimeSeries
 from darts.utils.likelihood_models import GaussianLikelihood
 
+from hcp.benchmark_batch import NeuralExecution
 from hcp.forecast_types import PreparedHistory, V2ModelSettings
 from hcp.forecast_validation import neural_split
 
@@ -87,7 +88,9 @@ def test_registered_constructor_scaling_selection_refit_and_streams(backend):
         V2ModelSettings(), n_samples=5, neural_max_epochs=5, neural_patience=1
     )
     seed = np.random.SeedSequence(71)
-    prediction = backend.transformer_prediction(histories(), settings, seed)
+    prediction = backend.transformer_prediction(
+        histories(), settings, seed, NeuralExecution.cpu()
+    )
     inner, full = Backend.instances
     for model in (inner, full):
         expected = {
@@ -168,7 +171,7 @@ def test_direct_nll_uses_fourth_step_original_units_causal_context_and_owned_bes
         data[0].dates, np.stack([h.observed for h in data]), data[0].forecast_dates
     )
     candidate = backend.TransformerCandidate(
-        data, V2ModelSettings(), np.random.SeedSequence(4)
+        data, V2ModelSettings(), np.random.SeedSequence(4), NeuralExecution.cpu()
     )
     candidate.train_epoch()
     candidate.retain_best_state()
@@ -204,8 +207,22 @@ def test_failure_preserves_phase_warning_evidence(backend, monkeypatch):
     monkeypatch.setattr(Backend, "fit", fail)
     with pytest.raises(RuntimeError) as caught:
         backend.transformer_prediction(
-            histories(), V2ModelSettings(), np.random.SeedSequence(8)
+            histories(),
+            V2ModelSettings(),
+            np.random.SeedSequence(8),
+            NeuralExecution.cpu(),
         )
     assert caught.value is error
     assert error.forecast_diagnostics["warnings"][0]["phase"] == "training"
     assert error.forecast_diagnostics["warning_counts"]["RuntimeWarning"] == 1
+
+
+def test_cuda_trainer_contract():
+    execution = NeuralExecution(
+        "cuda:0", "NVIDIA GeForce RTX 4080", ":4096:8", False, "32-true"
+    )
+    trainer = module()._trainer(execution)
+    assert trainer["accelerator"] == "gpu"
+    assert trainer["devices"] == [0]
+    assert trainer["precision"] == "32-true"
+    assert trainer["deterministic"] is True
