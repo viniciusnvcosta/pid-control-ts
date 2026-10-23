@@ -8,8 +8,11 @@ from dataclasses import asdict, dataclass, field
 import numpy as np
 import pandas as pd
 
+from hcp.benchmark_data import ActualPanel
 from hcp.benchmark_stats import v2_contrast_tables
+from hcp.conformal import fixed_pi_scales
 from hcp.data import ROOT, TERRITORIES, HierarchyBundle
+from hcp.forecast_preparation import _prepare_origin
 from hcp.forecast_types import DiagnosticsTables
 from hcp.panel import PanelConfig, forecaster_arms, forecaster_contrasts
 from hcp.panel_metrics import (
@@ -278,11 +281,18 @@ def _model_contrasts(
 
 
 def run_benchmark(
-    bundles: Mapping[str, HierarchyBundle], cfg: BenchmarkConfig
+    bundles: Mapping[str, HierarchyBundle],
+    cfg: BenchmarkConfig,
+    *,
+    actuals: ActualPanel | None = None,
 ) -> BenchmarkResult:
     """Evaluate hierarchy arms and model-reference contrasts on one common window."""
     if cfg.protocol_version == 2:
-        return _run_benchmark_v2(bundles, cfg)
+        if actuals is None:
+            raise ValueError(
+                "protocol v2 requires canonical actuals for the fixed PI scale"
+            )
+        return _run_benchmark_v2(bundles, cfg, actuals)
     start = common_evaluation_index(bundles, cfg)
     order = _required_models(cfg)
     root = np.random.SeedSequence(cfg.panel.root_seed, spawn_key=cfg.seed_spawn_key)
@@ -350,19 +360,15 @@ def run_benchmark(
     )
 
 
-def _fixed_common_pi_scales(bundle: HierarchyBundle, start: int) -> np.ndarray:
-    """Calculate per-node scales from reference truth known by the first cutoff."""
-    cutoff = bundle.forecast_dates[start]
-    prefix = bundle.y[:, bundle.dates <= cutoff]
-    scales = np.empty(len(bundle.nodes), dtype=float)
-    for index, values in enumerate(prefix):
-        finite = values[np.isfinite(values)]
-        if not finite.size:
-            raise ValueError(
-                f"node {bundle.nodes[index]!r} has no pre-evaluation PI history"
-            )
-        scales[index] = max(float(np.abs(finite).mean()), 1.0)
-    return scales
+def _fixed_common_pi_scales(
+    actuals: ActualPanel, forecast_date: np.datetime64
+) -> np.ndarray:
+    """Calculate scales from the prepared prefix at the first common cutoff."""
+    prepared = _prepare_origin(actuals, forecast_date, min_train_weeks=60)
+    if prepared is None:
+        raise ValueError("first common evaluation cutoff has no eligible PI history")
+    histories, _ = prepared
+    return fixed_pi_scales(histories)
 
 
 def _v2_metric_frames(
@@ -407,13 +413,15 @@ def _v2_metric_frames(
 
 
 def _run_benchmark_v2(
-    bundles: Mapping[str, HierarchyBundle], cfg: BenchmarkConfig
+    bundles: Mapping[str, HierarchyBundle], cfg: BenchmarkConfig, actuals: ActualPanel
 ) -> BenchmarkResult:
     """Run the registered twelve-cell v2 evaluation and paired inference."""
     start = common_evaluation_index(bundles, cfg)
     order = _required_models(cfg)
     reference = bundles[cfg.reference_model]
-    pi_scales = _fixed_common_pi_scales(reference, start)
+    if actuals.nodes != reference.nodes:
+        raise ValueError("canonical actual nodes do not match benchmark bundles")
+    pi_scales = _fixed_common_pi_scales(actuals, reference.forecast_dates[start])
     root = np.random.SeedSequence(cfg.panel.root_seed, spawn_key=cfg.seed_spawn_key)
     seeds = root.spawn(len(cfg.panel.blocks) + 1)
     draws = {

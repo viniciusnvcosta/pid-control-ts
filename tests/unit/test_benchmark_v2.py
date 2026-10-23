@@ -6,7 +6,13 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from hcp.benchmark import BenchmarkConfig, common_evaluation_index, run_benchmark
+from hcp.benchmark import (
+    BenchmarkConfig,
+    _fixed_common_pi_scales,
+    common_evaluation_index,
+    run_benchmark,
+)
+from hcp.benchmark_data import ActualPanel
 from hcp.conformal import ControllerConfig
 from hcp.data import HierarchyBundle
 from hcp.panel import PanelConfig
@@ -59,6 +65,33 @@ def _bundles(n: int = 90) -> dict[str, HierarchyBundle]:
     return {m: _bundle(n, m) for m in (*MODELS, REFERENCE)}
 
 
+def _actuals(bundles: dict[str, HierarchyBundle]) -> ActualPanel:
+    reference = bundles[REFERENCE]
+    history_dates = pd.date_range(
+        reference.dates[0] - np.timedelta64(560, "D"), periods=80, freq="7D"
+    ).to_numpy()
+    historical = reference.y[:, :1] - np.arange(80, 0, -1)[None, :] * 0.03
+    dates = np.concatenate([history_dates, reference.dates])
+    y = np.concatenate([historical, reference.y], axis=1)
+    observed = np.isfinite(y)
+    return ActualPanel(dates, reference.nodes, y, observed)
+
+
+def test_v2_pi_scale_uses_interpolated_prefix_at_first_eval_cutoff() -> None:
+    dates = pd.date_range("2018-01-06", periods=110, freq="7D").to_numpy()
+    index = np.arange(110, dtype=float)
+    y = np.vstack([index**2 + node for node in range(len(NODES))])
+    y[1, 40] = np.nan
+    actuals = ActualPanel(dates, NODES, y, np.isfinite(y))
+    cutoff = dates[90]
+    scale = _fixed_common_pi_scales(actuals, cutoff)
+    assert scale[1] != pytest.approx(np.nanmean(np.abs(y[1, :91])))
+    changed = y.copy()
+    changed[:, 91:] += 100_000
+    later_actuals = ActualPanel(dates, NODES, changed, np.isfinite(changed))
+    np.testing.assert_array_equal(scale, _fixed_common_pi_scales(later_actuals, cutoff))
+
+
 def test_v2_window_requires_all_models_and_retains_51_endpoint_leaves() -> None:
     bundles = _bundles(90)
     q = bundles["prophet"].q.copy()
@@ -92,7 +125,8 @@ def test_v2_fixed_pi_scales_ignore_evaluation_truth(monkeypatch) -> None:
 
     monkeypatch.setattr(panel_module, "conformalize", fake_conformalize)
     bundles = _bundles(90)
-    result = run_benchmark(bundles, _config())
+    actuals = _actuals(bundles)
+    result = run_benchmark(bundles, _config(), actuals=actuals)
     cells = result.metrics[
         ["model", "reconciler", "controller", "lr"]
     ].drop_duplicates()
@@ -103,7 +137,15 @@ def test_v2_fixed_pi_scales_ignore_evaluation_truth(monkeypatch) -> None:
         y = bundle.y.copy()
         y[:, 25:] += 10000
         bundles[name] = replace(bundle, y=y)
-    run_benchmark(bundles, _config())
+    changed_actuals = actuals.y.copy()
+    changed_actuals[:, 105:] += 10000
+    actuals = ActualPanel(
+        actuals.dates,
+        actuals.nodes,
+        changed_actuals,
+        np.isfinite(changed_actuals),
+    )
+    run_benchmark(bundles, _config(), actuals=actuals)
     assert first == tuple(captured)
     n_nodes = len(NODES)
     per_model = 4 * n_nodes
