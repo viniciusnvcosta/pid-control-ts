@@ -101,10 +101,17 @@ def _configure_v2_cuda(execution: NeuralExecution) -> DeviceProvenance:
     Raises:
         RuntimeError: If CUDA hardware or deterministic initialization fails.
     """
-    if execution.device != "cuda:0" or execution.cublas_workspace_config != ":4096:8":
+    if (
+        execution.device != "cuda:0"
+        or execution.cublas_workspace_config != ":4096:8"
+        or execution.required_gpu_name != "NVIDIA GeForce RTX 4080"
+    ):
         raise RuntimeError("registered CUDA execution settings are required")
+    import torch  # noqa: PLC0415 - inspect runtime state only at the launch boundary.
+
+    if torch.cuda.is_initialized():
+        raise RuntimeError("CUDA runtime is already initialized")
     os.environ["CUBLAS_WORKSPACE_CONFIG"] = execution.cublas_workspace_config
-    import torch  # noqa: PLC0415 - cuBLAS environment must precede Torch initialization.
 
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is unavailable")

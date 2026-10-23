@@ -194,6 +194,7 @@ def _cuda_torch(monkeypatch, *, available=True, count=1, name="NVIDIA GeForce RT
         __version__="2.8.0",
         version=SimpleNamespace(cuda="12.8"),
         cuda=SimpleNamespace(
+            is_initialized=lambda: False,
             is_available=lambda: operation(available),
             device_count=lambda: operation(count),
             set_device=lambda index: operation(index),
@@ -268,3 +269,26 @@ def test_nvidia_query_matches_visible_uuid_not_physical_index(monkeypatch):
     result = probe(0)
     assert result == {"GPU-other": "570.1", "GPU-test": "570.1"}
     assert "--query-gpu=uuid,driver_version" in calls[0]
+
+
+
+def test_cuda_gate_rejects_matching_unregistered_gpu(monkeypatch):
+    from dataclasses import replace
+
+    _cuda_torch(monkeypatch, name="NVIDIA GeForce RTX 4090")
+    execution = replace(_execution(), required_gpu_name="NVIDIA GeForce RTX 4090")
+    with pytest.raises(RuntimeError, match="registered.*GPU|registered CUDA"):
+        run_module._configure_v2_cuda(execution)
+
+
+def test_cuda_gate_rejects_initialized_runtime_without_mutation(monkeypatch):
+    import os
+
+    fake = _cuda_torch(monkeypatch)
+    fake.cuda.is_initialized = lambda: True
+    monkeypatch.setenv("CUBLAS_WORKSPACE_CONFIG", "existing-setting")
+    with pytest.raises(RuntimeError, match="already initialized"):
+        run_module._configure_v2_cuda(_execution())
+    assert os.environ["CUBLAS_WORKSPACE_CONFIG"] == "existing-setting"
+    assert fake.backends.cuda.matmul.allow_tf32 is True
+    assert fake.backends.cudnn.allow_tf32 is True
