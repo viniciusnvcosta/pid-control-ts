@@ -124,6 +124,17 @@ class V2ModelSettings(ForecastSettings):
     neural_patience: int = 10
     neural_min_delta: float = 0.0
 
+    def __post_init__(self) -> None:
+        """Normalize TOML list values to immutable tuples."""
+        for name in (
+            "arima_order",
+            "sarima_seasonal_order",
+            "levels",
+            "qr_alphas",
+            "enhanced_hidden_dims",
+        ):
+            object.__setattr__(self, name, tuple(getattr(self, name)))
+
 
 @dataclass(frozen=True)
 class NativePrediction:
@@ -195,13 +206,42 @@ def prediction_quantiles(prediction: NativePrediction) -> np.ndarray:
     )
 
 
-def _empty_diagnostic_table() -> pd.DataFrame:
+_DIAGNOSTIC_COLUMNS = {
+    "forecast_diagnostics": (
+        "model",
+        "node",
+        "forecast_date",
+        "phase",
+        "name",
+        "value",
+    ),
+    "tuning": ("model", "node", "forecast_date", "candidate", "selected", "score"),
+    "quantile_repairs": (
+        "model",
+        "node",
+        "forecast_date",
+        "stage",
+        "before",
+        "after",
+        "count",
+    ),
+    "warnings": (
+        "category",
+        "message",
+        "source",
+        "model",
+        "node",
+        "origin",
+        "candidate",
+        "phase",
+        "count",
+    ),
+}
+
+
+def _empty_diagnostic_table(name: str) -> pd.DataFrame:
     return pd.DataFrame(
-        {
-            "model": pd.Series(dtype="str"),
-            "node": pd.Series(dtype="str"),
-            "forecast_date": pd.Series(dtype="datetime64[ns]"),
-        }
+        {column: pd.Series(dtype="object") for column in _DIAGNOSTIC_COLUMNS[name]}
     )
 
 
@@ -213,10 +253,18 @@ class DiagnosticsTables:
     fields. The frozen container owns copies; pandas contents remain mutable.
     """
 
-    forecast_diagnostics: pd.DataFrame = field(default_factory=_empty_diagnostic_table)
-    tuning: pd.DataFrame = field(default_factory=_empty_diagnostic_table)
-    quantile_repairs: pd.DataFrame = field(default_factory=_empty_diagnostic_table)
-    warnings: pd.DataFrame = field(default_factory=_empty_diagnostic_table)
+    forecast_diagnostics: pd.DataFrame = field(
+        default_factory=lambda: _empty_diagnostic_table("forecast_diagnostics")
+    )
+    tuning: pd.DataFrame = field(
+        default_factory=lambda: _empty_diagnostic_table("tuning")
+    )
+    quantile_repairs: pd.DataFrame = field(
+        default_factory=lambda: _empty_diagnostic_table("quantile_repairs")
+    )
+    warnings: pd.DataFrame = field(
+        default_factory=lambda: _empty_diagnostic_table("warnings")
+    )
 
     def __post_init__(self) -> None:
         for name in ("forecast_diagnostics", "tuning", "quantile_repairs", "warnings"):

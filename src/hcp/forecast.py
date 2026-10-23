@@ -13,6 +13,13 @@ import pandas as pd
 
 from hcp.benchmark_data import ActualPanel
 from hcp.data import HierarchyBundle
+from hcp.forecast_classical import (
+    arima_prediction,
+    prophet_prediction,
+    sarima_prediction,
+)
+from hcp.forecast_deepar import enhanced_deepar_prediction
+from hcp.forecast_diagnostics import _diagnostic_frame
 from hcp.forecast_models import (
     ForecastSettings,
     PreparedHistory,
@@ -20,16 +27,60 @@ from hcp.forecast_models import (
     deepar_samples,
     sarima_samples,
 )
-from hcp.forecast_types import DiagnosticsTables
+from hcp.forecast_neural import transformer_prediction
+from hcp.forecast_preparation import (
+    _bundle,
+    _long_forecasts,
+    _prepare_origin,
+    _validate_inputs,
+)
+from hcp.forecast_quantile import qr_prediction
+from hcp.forecast_types import (
+    DiagnosticsTables,
+    NativePrediction,
+    V2ModelSettings,
+    prediction_quantiles,
+)
 
 ForecastAdapter = Callable[
     [tuple[PreparedHistory, ...], ForecastSettings, np.random.SeedSequence],
-    np.ndarray,
+    np.ndarray | NativePrediction,
 ]
+
+
+def _arima_adapter(histories, settings, seed):
+    return (
+        arima_prediction(histories, settings, seed)
+        if isinstance(settings, V2ModelSettings)
+        else arima_samples(histories, settings, seed)
+    )
+
+
+def _sarima_adapter(histories, settings, seed):
+    return (
+        sarima_prediction(histories, settings, seed)
+        if isinstance(settings, V2ModelSettings)
+        else sarima_samples(histories, settings, seed)
+    )
+
+
+def _deepar_adapter(histories, settings, seed):
+    samples = deepar_samples(histories, settings, seed)
+    if isinstance(settings, V2ModelSettings):
+        return NativePrediction(
+            tuple(h.node for h in histories), settings.ahead, "samples", samples=samples
+        )
+    return samples
+
+
 FORECASTERS: dict[str, ForecastAdapter] = {
-    "arima": arima_samples,
-    "sarima": sarima_samples,
-    "deepar": deepar_samples,
+    "arima": _arima_adapter,
+    "sarima": _sarima_adapter,
+    "deepar": _deepar_adapter,
+    "prophet": prophet_prediction,
+    "transformer": transformer_prediction,
+    "qr_l1": qr_prediction,
+    "deepar_enhanced": enhanced_deepar_prediction,
 }
 
 
@@ -43,7 +94,11 @@ class ForecastConfig:
     refit_every: int = 1
     root_seed: int = 0
     seed_spawn_key: tuple[int, ...] = (0,)
-    settings: ForecastSettings = field(default_factory=ForecastSettings)
+    settings: ForecastSettings | V2ModelSettings = field(
+        default_factory=ForecastSettings
+    )
+    protocol_version: int = 1
+    v2_settings: V2ModelSettings | None = None
 
     def __post_init__(self) -> None:
         if not self.models or len(set(self.models)) != len(self.models):
@@ -67,6 +122,33 @@ class ForecastConfig:
             raise ValueError("n_samples must be positive")
         if self.root_seed < 0 or any(value < 0 for value in self.seed_spawn_key):
             raise ValueError("seed values must be non-negative")
+        if self.protocol_version not in (1, 2):
+            raise ValueError("protocol_version must be 1 or 2")
+        if (
+            self.protocol_version == 1
+            and self.models != ("arima", "sarima", "deepar")
+            and set(self.models)
+            & {"prophet", "transformer", "qr_l1", "deepar_enhanced"}
+        ):
+            raise ValueError("v2 models require protocol_version=2")
+        if self.protocol_version == 2:
+            expected = (
+                "arima",
+                "sarima",
+                "deepar",
+                "prophet",
+                "transformer",
+                "qr_l1",
+                "deepar_enhanced",
+            )
+            if self.models != expected or self.v2_settings is None:
+                raise ValueError(
+                    "v2 requires its registered model order and model settings"
+                )
+            if self.settings is not self.v2_settings:
+                raise ValueError(
+                    "v2 settings must be shared by settings and v2_settings"
+                )
 
 
 @dataclass(frozen=True)
@@ -77,120 +159,6 @@ class ForecastResult:
     base_forecasts: pd.DataFrame
     diagnostics: dict
     tables: DiagnosticsTables = field(default_factory=DiagnosticsTables)
-
-
-def _weekly(name: str, values: np.ndarray) -> np.ndarray:
-    array = np.asarray(values, dtype="datetime64[ns]")
-    if array.ndim != 1 or len(array) == 0:
-        raise ValueError(f"{name} must be a non-empty one-dimensional date grid")
-    if len(array) > 1 and not np.all(np.diff(array) == np.timedelta64(7, "D")):
-        raise ValueError(f"{name} must be a strict weekly grid")
-    return array
-
-
-def _validate_inputs(
-    actuals: ActualPanel, dates: np.ndarray, forecast_dates: np.ndarray
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    actual_dates = _weekly("canonical actual dates", actuals.dates)
-    targets = _weekly("target dates", dates)
-    origins = _weekly("forecast dates", forecast_dates)
-    if origins.shape != targets.shape:
-        raise ValueError("forecast-date and target-date grids must have the same shape")
-    if np.any(targets - origins != np.timedelta64(26, "D")):
-        raise ValueError("benchmark forecasts require the registered 26-day lag")
-    expected = (len(actuals.nodes), len(actual_dates))
-    if actuals.y.shape != expected or actuals.observed.shape != expected:
-        raise ValueError(f"canonical node/date shape must be {expected}")
-    target_index = pd.Index(actual_dates).get_indexer(pd.Index(targets))
-    if np.any(target_index < 0):
-        raise ValueError("target date is unavailable in canonical actuals")
-    return targets, origins, target_index
-
-
-def _prepare_origin(
-    actuals: ActualPanel,
-    forecast_date: np.datetime64,
-    min_train_weeks: int,
-) -> tuple[tuple[PreparedHistory, ...], list[dict]] | None:
-    prefix = actuals.dates <= forecast_date
-    histories = []
-    records = []
-    for row, node in enumerate(actuals.nodes):
-        dates = np.asarray(actuals.dates[prefix], dtype="datetime64[ns]")
-        values = np.asarray(actuals.y[row, prefix], dtype=float)
-        finite = np.flatnonzero(np.isfinite(values))
-        if not len(finite):
-            return None
-        start = int(finite[0])
-        dates = dates[start:].copy()
-        values = values[start:].copy()
-        raw = int(np.isfinite(values).sum())
-        missing = ~np.isfinite(values)
-        filled = pd.Series(values).interpolate(limit_area="inside").to_numpy()
-        interpolated = int(np.sum(missing & np.isfinite(filled)))
-        if len(filled) < min_train_weeks or not np.isfinite(filled).all():
-            return None
-        dates.setflags(write=False)
-        filled.setflags(write=False)
-        histories.append(
-            PreparedHistory(
-                node=node,
-                dates=dates,
-                values=filled,
-                raw_values=values,
-                observed=actuals.observed[row, prefix][start:],
-                forecast_dates=dates - np.timedelta64(26, "D"),
-            )
-        )
-        records.append(
-            {
-                "node": node,
-                "training_start": str(pd.Timestamp(dates[0]).date()),
-                "training_end": str(pd.Timestamp(dates[-1]).date()),
-                "raw_observations": raw,
-                "interpolated_observations": interpolated,
-            }
-        )
-    return tuple(histories), records
-
-
-def _bundle(
-    actuals: ActualPanel,
-    dates: np.ndarray,
-    forecast_dates: np.ndarray,
-    target_index: np.ndarray,
-    quantiles: np.ndarray,
-) -> HierarchyBundle:
-    arrays = {
-        "dates": dates.copy(),
-        "forecast_dates": forecast_dates.copy(),
-        "y": actuals.y[:, target_index].copy(),
-        "q": quantiles,
-        "imputed": np.zeros(quantiles.shape[:2], dtype=bool),
-    }
-    for array in arrays.values():
-        array.setflags(write=False)
-    return HierarchyBundle(nodes=actuals.nodes, **arrays)
-
-
-def _long_forecasts(model: str, bundle: HierarchyBundle) -> pd.DataFrame:
-    rows = []
-    for week, forecast_date, q_week in zip(
-        bundle.dates, bundle.forecast_dates, bundle.q.transpose(1, 0, 2), strict=True
-    ):
-        for node, values in zip(bundle.nodes, q_week, strict=True):
-            rows.append(
-                {
-                    "model": model,
-                    "node": node,
-                    "week": week,
-                    "forecast_date": forecast_date,
-                    "q_lo": values[0],
-                    "q_med": values[1],
-                    "q_hi": values[2],
-                }
-            )
-    return pd.DataFrame(rows)
 
 
 def generate_model_bundles(
@@ -231,6 +199,12 @@ def generate_model_bundles(
     bundles: dict[str, HierarchyBundle] = {}
     frames = []
     model_diagnostics = {}
+    diagnostic_rows = {
+        "forecast_diagnostics": [],
+        "tuning": [],
+        "quantile_repairs": [],
+        "warnings": [],
+    }
     for model_name, model_seed in zip(
         cfg.models, root.spawn(len(cfg.models)), strict=True
     ):
@@ -250,23 +224,70 @@ def generate_model_bundles(
             try:
                 with warnings.catch_warnings(record=True) as caught:
                     warnings.simplefilter("always")
-                    samples = np.asarray(adapter(histories, cfg.settings, origin_seed))
+                    output = adapter(histories, cfg.settings, origin_seed)
             except Exception as exc:
                 raise RuntimeError(
                     f"model {model_name!r} failed at origin "
                     f"{pd.Timestamp(origins[index]).date()}: {exc}"
                 ) from exc
             warning_counts.update(warning.category.__name__ for warning in caught)
-            expected = (len(actuals.nodes), cfg.settings.ahead, cfg.settings.n_samples)
-            if samples.shape != expected:
-                raise ValueError(
-                    f"model {model_name!r} returned shape {samples.shape}, expected {expected}"
+            origin = pd.Timestamp(origins[index])
+            for warning in caught:
+                diagnostic_rows["warnings"].append(
+                    {
+                        "category": warning.category.__name__,
+                        "message": str(warning.message),
+                        "source": f"{warning.filename}:{warning.lineno}",
+                        "model": model_name,
+                        "node": None,
+                        "origin": origin,
+                        "candidate": None,
+                        "phase": "outer_fit",
+                        "count": 1,
+                    }
                 )
-            if not np.isfinite(samples).all():
-                raise ValueError(f"model {model_name!r} returned non-finite samples")
-            q[:, index, :] = np.quantile(
-                samples[:, cfg.settings.ahead - 1, :], cfg.quantiles, axis=-1
-            ).T
+            if isinstance(output, NativePrediction):
+                if (
+                    output.nodes != tuple(history.node for history in histories)
+                    or output.ahead != cfg.settings.ahead
+                ):
+                    raise ValueError(
+                        "native prediction nodes or horizon differ from prepared histories"
+                    )
+                samples = output.samples
+                q[:, index, :] = prediction_quantiles(output)
+                if output.diagnostics:
+                    warning_counts.update(output.diagnostics.get("warning_counts", {}))
+                    for key in (
+                        "forecast_diagnostics",
+                        "tuning",
+                        "quantile_repairs",
+                        "warnings",
+                    ):
+                        for row in output.diagnostics.get(key, ()):
+                            diagnostic_rows[key].append(
+                                {"model": model_name, "origin": origin, **row}
+                            )
+            else:
+                samples = np.asarray(output)
+            if samples is not None:
+                expected = (
+                    len(actuals.nodes),
+                    cfg.settings.ahead,
+                    cfg.settings.n_samples,
+                )
+                if samples.shape != expected:
+                    raise ValueError(
+                        f"model {model_name!r} returned shape {samples.shape}, expected {expected}"
+                    )
+                if not np.isfinite(samples).all():
+                    raise ValueError(
+                        f"model {model_name!r} returned non-finite samples"
+                    )
+                if not isinstance(output, NativePrediction):
+                    q[:, index, :] = np.quantile(
+                        samples[:, cfg.settings.ahead - 1, :], cfg.quantiles, axis=-1
+                    ).T
             if np.any(np.diff(q[:, index, :], axis=-1) < 0):
                 raise ValueError(f"model {model_name!r} returned crossed quantiles")
             interpolation.extend(
@@ -276,7 +297,12 @@ def generate_model_bundles(
             fit_count += 1
         bundle = _bundle(actuals, targets, origins, target_index, q)
         bundles[model_name] = bundle
-        frames.append(_long_forecasts(model_name, bundle))
+        source_kind = None
+        if cfg.protocol_version == 2:
+            source_kind = (
+                "native_quantiles" if model_name == "qr_l1" else "sample_derived"
+            )
+        frames.append(_long_forecasts(model_name, bundle, source_kind))
         model_diagnostics[model_name] = {
             "fit_count": fit_count,
             "warning_counts": dict(sorted(warning_counts.items())),
@@ -294,4 +320,31 @@ def generate_model_bundles(
                 "model_order": list(cfg.models),
             },
         },
+        tables=DiagnosticsTables(
+            **{
+                key: _diagnostic_frame(key, rows, table_columns)
+                for key, rows, table_columns in (
+                    (
+                        "forecast_diagnostics",
+                        diagnostic_rows["forecast_diagnostics"],
+                        DiagnosticsTables().forecast_diagnostics.columns,
+                    ),
+                    (
+                        "tuning",
+                        diagnostic_rows["tuning"],
+                        DiagnosticsTables().tuning.columns,
+                    ),
+                    (
+                        "quantile_repairs",
+                        diagnostic_rows["quantile_repairs"],
+                        DiagnosticsTables().quantile_repairs.columns,
+                    ),
+                    (
+                        "warnings",
+                        diagnostic_rows["warnings"],
+                        DiagnosticsTables().warnings.columns,
+                    ),
+                )
+            }
+        ),
     )
