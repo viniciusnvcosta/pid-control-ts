@@ -41,5 +41,17 @@ markers = [
 [tool.ruff.lint]
 extend-select = ["PLC0415"]
 
+[tool.ruff]
+extend-exclude = [
+    "tests/base_plots.py",
+    "tests/base_test.py",
+    "tests/datasets.py",
+    "tests/datasets/covid-ts-proc/statewide/death-forecasting-perstate-lasso-qr.ipynb",
+    "tests/inset_plot.py",
+    "tests/plotting_utils.py",
+    "docs/superpowers/plans/2026-10-20-hierarchical-panel.md",
+    "docs/superpowers/plans/2026-10-22-probabilistic-model-benchmarks-v2.md",
+]
+
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["PLC0415"]
