@@ -397,6 +397,7 @@ def _write_benchmark_v2_artifacts(
             raise RuntimeError(
                 f"Git HEAD changed during benchmark: {initial_sha} -> {current_sha}"
             )
+        final_sha = current_sha
         manifest = _manifest(
             cfg,
             input_sha256,
@@ -420,6 +421,8 @@ def _write_benchmark_v2_artifacts(
             },
         )
         manifest["git_sha"] = initial_sha
+        manifest["initial_git_sha"] = initial_sha
+        manifest["final_git_sha"] = final_sha
         manifest["git_dirty"] = False
         manifest["protocol_id"] = "probabilistic-model-benchmarks-v2"
         manifest["provenance"] = {
@@ -507,7 +510,7 @@ def _write_benchmark_v2_artifacts(
             json.dumps(manifest, indent=2, default=str)
         )
         current_sha = require_clean_git(repo)
-        if current_sha != initial_sha:
+        if current_sha != initial_sha or current_sha != final_sha:
             raise RuntimeError(
                 f"Git HEAD changed before publication: {initial_sha} -> {current_sha}"
             )

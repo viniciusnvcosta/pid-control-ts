@@ -1,5 +1,7 @@
 # ABOUTME: Exercises the v2 CLI publication path with synthetic adapter output.
 # ABOUTME: Keeps all data and result identities in a temporary directory.
+import importlib.metadata
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -29,6 +31,11 @@ def test_v2_cli_writes_all_models_cells_tables_and_manifest(
 ) -> None:
     input_path = tmp_path / "synthetic.csv"
     input_path.write_text("synthetic")
+    file_hashes = {
+        "synthetic.csv": "b" * 64,
+        "model_benchmarks_v2.toml": "c" * 64,
+        "uv.lock": "d" * 64,
+    }
     cfg = RunConfig(
         run_id="synthetic-v2",
         root_seed=20261021,
@@ -40,8 +47,18 @@ def test_v2_cli_writes_all_models_cells_tables_and_manifest(
         benchmark={"protocol_version": 2},
     )
     monkeypatch.setattr(run_module, "load_config", lambda path: cfg)
-    monkeypatch.setattr(run_module, "require_clean_git", lambda repo: "a" * 40)
-    monkeypatch.setattr(run_module, "file_sha256", lambda path: "b" * 64)
+    git_checks = []
+
+    def checked_git(repo):
+        git_checks.append("a" * 40)
+        return git_checks[-1]
+
+    monkeypatch.setattr(run_module, "require_clean_git", checked_git)
+    monkeypatch.setattr(
+        run_module,
+        "file_sha256",
+        lambda path: file_hashes[Path(path).name],
+    )
     monkeypatch.setattr(run_module, "read_forecasts", lambda path: pd.DataFrame())
     monkeypatch.setattr(
         run_module,
@@ -72,7 +89,17 @@ def test_v2_cli_writes_all_models_cells_tables_and_manifest(
             "model": model,
             "reconciler": reconciler,
             "controller": controller,
-            "role": "descriptive",
+            "role": (
+                "principal"
+                if (reconciler, controller)
+                in {
+                    ("none", "raw"),
+                    ("none", "pi_norm"),
+                    ("mint_median", "raw"),
+                    ("mint_median", "pi_norm"),
+                }
+                else "descriptive"
+            ),
         }
         for model in MODELS
         for reconciler in cfg.reconcilers
@@ -95,6 +122,33 @@ def test_v2_cli_writes_all_models_cells_tables_and_manifest(
             for _ in range(7)
         ]
     )
+    diagnostics_tables = DiagnosticsTables(
+        tuning=pd.DataFrame(
+            [
+                {
+                    "model": "qr_l1",
+                    "node": "CA",
+                    "forecast_date": "2024-01-01",
+                    "candidate": 0.1,
+                    "selected": True,
+                    "score": 1.0,
+                }
+            ]
+        ),
+        quantile_repairs=pd.DataFrame(
+            [
+                {
+                    "model": "qr_l1",
+                    "node": "CA",
+                    "forecast_date": "2024-01-01",
+                    "stage": "native",
+                    "before": [2.0, 1.0, 3.0],
+                    "after": [1.5, 1.5, 3.0],
+                    "count": 1,
+                }
+            ]
+        ),
+    )
     fake_result = BenchmarkResult(
         frame,
         frame,
@@ -108,7 +162,7 @@ def test_v2_cli_writes_all_models_cells_tables_and_manifest(
             "n_weeks": 60,
             "pi_scales": {"US": 10.0},
         },
-        DiagnosticsTables(),
+        diagnostics_tables,
     )
     monkeypatch.setattr(
         run_module, "run_benchmark", lambda *args, **kwargs: fake_result
@@ -118,6 +172,28 @@ def test_v2_cli_writes_all_models_cells_tables_and_manifest(
         "benchmark_figures",
         lambda *args, **kwargs: {f"figure-{index}": plt.figure() for index in range(5)},
     )
+    events = []
+    original_write_text = Path.write_text
+
+    def observe_manifest_write(path, *args, **kwargs):
+        if path.name == "manifest.json":
+            assert len(list(path.parent.glob("*.parquet"))) == 10
+            assert len(list((path.parent / "figures").glob("*.pdf"))) == 5
+            events.append("manifest")
+        return original_write_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", observe_manifest_write)
+    original_publish = run_module._rename_noreplace
+
+    def observe_publish(staging, destination):
+        assert events == ["manifest"]
+        assert (staging / "manifest.json").is_file()
+        assert len(list(staging.glob("*.parquet"))) == 10
+        assert len(list((staging / "figures").glob("*.pdf"))) == 5
+        events.append("publish")
+        original_publish(staging, destination)
+
+    monkeypatch.setattr(run_module, "_rename_noreplace", observe_publish)
 
     assert run_module.main([str(tmp_path / "config.toml")]) == 0
 
@@ -127,10 +203,73 @@ def test_v2_cli_writes_all_models_cells_tables_and_manifest(
     assert len(pd.read_parquet(out / "model_contrasts.parquet")) == 56
     assert len(list(out.glob("*.parquet"))) == 10
     assert len(list((out / "figures").glob("*.pdf"))) == 5
-    manifest = __import__("json").loads((out / "manifest.json").read_text())
+    metrics = pd.read_parquet(out / "metrics.parquet")
+    roles = metrics.groupby(["model", "role"]).size().unstack(fill_value=0)
+    assert set(roles.index) == set(MODELS)
+    assert (roles["principal"] == 4).all()
+    assert (roles["descriptive"] == 8).all()
+    principal_pairs = {
+        ("none", "raw"),
+        ("none", "pi_norm"),
+        ("mint_median", "raw"),
+        ("mint_median", "pi_norm"),
+    }
+    for model in MODELS:
+        model_rows = metrics[metrics["model"] == model]
+        assert (
+            set(
+                model_rows.loc[
+                    model_rows["role"] == "principal", ["reconciler", "controller"]
+                ].itertuples(index=False, name=None)
+            )
+            == principal_pairs
+        )
+    assert events == ["manifest", "publish"]
+    manifest = json.loads((out / "manifest.json").read_text())
+    assert manifest["initial_git_sha"] == "a" * 40
+    assert manifest["final_git_sha"] == manifest["initial_git_sha"]
+    assert manifest["git_sha"] == manifest["initial_git_sha"]
+    assert len(git_checks) == 3
     assert manifest["diagnostics"]["benchmark"]["model_order"] == list(MODELS)
     assert manifest["seed"]["streams"]["forecast"]["spawn_key"] == [0]
     assert manifest["seed"]["streams"]["evaluation"]["spawn_key"] == [1]
     assert manifest["families"]["hierarchy"]["size"] == 96
     assert manifest["families"]["model"]["size"] == 56
+    assert manifest["execution"] == {
+        "device": "cpu",
+        "devices": 1,
+        "data_loader_workers": 0,
+        "deterministic_algorithms": True,
+    }
+    assert manifest["provenance"] == {
+        "config_sha256": "c" * 64,
+        "lockfile_sha256": "d" * 64,
+    }
+    for key, distribution in {
+        "darts": "darts",
+        "torch": "torch",
+        "lightning": "pytorch-lightning",
+        "prophet": "prophet",
+        "scikit_learn": "scikit-learn",
+        "matplotlib": "matplotlib",
+        "pyarrow": "pyarrow",
+        "scipy": "scipy",
+        "seaborn": "seaborn",
+        "tqdm": "tqdm",
+    }.items():
+        assert manifest["versions"][key] == importlib.metadata.version(distribution)
+    assert manifest["models"]["scales"] == {"US": 10.0}
+    assert manifest["diagnostic_summary"]["selected_candidates"] == [
+        {
+            "model": "qr_l1",
+            "node": "CA",
+            "forecast_date": "2024-01-01",
+            "candidate": 0.1,
+            "selected": True,
+            "score": 1.0,
+        }
+    ]
+    assert len(manifest["diagnostic_summary"]["repairs"]) == 1
+    assert pd.read_parquet(out / "warnings.parquet").empty
+    assert pd.read_parquet(out / "quantile_repairs.parquet").shape[0] == 1
     assert "D15" in manifest["limitations"]

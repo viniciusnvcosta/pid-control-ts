@@ -100,12 +100,35 @@ def test_v2_writer_publishes_ten_tables_five_figures_manifest_last(
     assert len(list(out.glob("*.parquet"))) == 10
     assert len(list((out / "figures").glob("*.pdf"))) == 5
     manifest = __import__("json").loads((out / "manifest.json").read_text())
+    assert manifest["initial_git_sha"] == "a" * 40
+    assert manifest["final_git_sha"] == manifest["initial_git_sha"]
+    assert manifest["git_sha"] == manifest["initial_git_sha"]
     assert manifest["provenance"]["config_sha256"]
     assert manifest["provenance"]["lockfile_sha256"]
     assert manifest["families"]["hierarchy"]["size"] == 96
     assert manifest["families"]["model"]["size"] == 56
     assert "D15" in manifest["limitations"]
     assert "v1 outcomes informed v2" in manifest["analysis_note"]
+    assert list(pd.read_parquet(out / "warnings.parquet").columns) == [
+        "category",
+        "message",
+        "source",
+        "model",
+        "node",
+        "origin",
+        "candidate",
+        "phase",
+        "count",
+    ]
+    assert list(pd.read_parquet(out / "quantile_repairs.parquet").columns) == [
+        "model",
+        "node",
+        "forecast_date",
+        "stage",
+        "before",
+        "after",
+        "count",
+    ]
     assert not list(cfg.output_dir.glob(".*.partial"))
 
 
