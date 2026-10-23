@@ -23,6 +23,10 @@ CONTRASTS = (
     "pi_given_reconciliation",
     "interaction",
 )
+ARM_KEY = (
+    "A = none / raw     B = none / normalized PI     "
+    "C = mint_median / raw     D = mint_median / normalized PI"
+)
 
 
 def _figure(width: float = 9, height: float = 4) -> Figure:
@@ -37,6 +41,11 @@ def _arm_data(result: BenchmarkResult, level: str) -> pd.DataFrame:
     if data.empty:
         return data
     return data[(data["level"] == level) & data["controller"].isin(("raw", "pi_norm"))]
+
+
+def _add_arm_key(fig: Figure) -> None:
+    """Add the registered A-D definitions below principal arm plots."""
+    fig.text(0.5, 0.008, ARM_KEY, ha="center", va="bottom", fontsize=8)
 
 
 def _quality(result: BenchmarkResult) -> Figure:
@@ -65,7 +74,8 @@ def _quality(result: BenchmarkResult) -> Figure:
         ax.set_ylabel(label)
         ax.set_title(f"{label} · four principal arms")
         ax.legend(title="Arm", frameon=False)
-    fig.tight_layout()
+    fig.tight_layout(rect=(0, 0.04, 1, 1))
+    _add_arm_key(fig)
     return fig
 
 
@@ -132,7 +142,8 @@ def _tradeoff(result: BenchmarkResult) -> Figure:
         ax.set_ylabel(label)
         ax.legend(title="Arm", frameon=False)
     fig.suptitle("Coverage and score trade-off · empty-set rates shown")
-    fig.tight_layout()
+    fig.tight_layout(rect=(0, 0.04, 1, 1))
+    _add_arm_key(fig)
     return fig
 
 
