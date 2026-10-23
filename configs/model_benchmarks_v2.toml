@@ -34,6 +34,13 @@ min_eval_weeks = 60
 forecast_seed_spawn_key = [0]
 evaluation_seed_spawn_key = [1]
 
+[benchmark.execution]
+device = "cuda:0"
+required_gpu_name = "NVIDIA GeForce RTX 4080"
+cublas_workspace_config = ":4096:8"
+allow_tf32 = false
+precision = "32-true"
+
 [benchmark.model_settings]
 # Model parameters use the frozen V2ModelSettings defaults from spec sections 3.1-3.6.
 ahead = 4

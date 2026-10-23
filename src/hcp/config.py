@@ -350,8 +350,10 @@ def benchmark_configs(cfg: RunConfig) -> tuple[ForecastConfig, BenchmarkConfig]:
 
 
 def config_manifest(cfg: RunConfig) -> dict:
-    """Return a serializable config mapping without absent optional sections."""
+    """Return a serializable config mapping, including the v2 execution contract."""
     values = asdict(cfg)
     if cfg.benchmark is None:
         values.pop("benchmark")
+    elif isinstance(cfg.benchmark, BenchmarkV2Settings):
+        values["benchmark"]["execution"] = asdict(cfg.benchmark.execution)
     return values

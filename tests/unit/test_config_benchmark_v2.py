@@ -5,7 +5,12 @@ from dataclasses import replace
 
 import pytest
 
-from hcp.config import BenchmarkSettings, benchmark_configs, load_config
+from hcp.config import (
+    BenchmarkSettings,
+    benchmark_configs,
+    config_manifest,
+    load_config,
+)
 from hcp.config_benchmark_v2 import BenchmarkV2Settings
 from tests.helpers import ROOT_DIR
 
@@ -35,6 +40,74 @@ def test_v2_config_has_registered_order_and_defaults() -> None:
     assert forecast.settings.ahead == 4 and forecast.settings.n_samples == 500
     assert forecast.v2_settings.neural_max_epochs == 100
     assert benchmark.reference_model == "covidhub"
+    assert cfg.benchmark.execution.device == "cuda:0"
+    assert cfg.benchmark.execution.required_gpu_name == "NVIDIA GeForce RTX 4080"
+    assert cfg.benchmark.execution.cublas_workspace_config == ":4096:8"
+    assert cfg.benchmark.execution.allow_tf32 is False
+    assert cfg.benchmark.execution.precision == "32-true"
+    assert config_manifest(cfg)["benchmark"]["execution"] == {
+        "device": "cuda:0",
+        "required_gpu_name": "NVIDIA GeForce RTX 4080",
+        "cublas_workspace_config": ":4096:8",
+        "allow_tf32": False,
+        "precision": "32-true",
+    }
+
+
+@pytest.mark.parametrize(
+    "execution",
+    [
+        {
+            "device": "cuda:1",
+            "required_gpu_name": "NVIDIA GeForce RTX 4080",
+            "cublas_workspace_config": ":4096:8",
+            "allow_tf32": False,
+            "precision": "32-true",
+        },
+        {
+            "device": "cuda:0",
+            "required_gpu_name": "NVIDIA GeForce RTX 4080",
+            "cublas_workspace_config": ":4096:8",
+            "allow_tf32": True,
+            "precision": "32-true",
+        },
+        {
+            "device": "cuda:0",
+            "required_gpu_name": "NVIDIA GeForce RTX 4080",
+            "cublas_workspace_config": ":4096:8",
+            "allow_tf32": False,
+            "precision": "16-mixed",
+        },
+        {
+            "device": "cuda:0",
+            "required_gpu_name": "NVIDIA RTX 4090",
+            "cublas_workspace_config": ":4096:8",
+            "allow_tf32": False,
+            "precision": "32-true",
+        },
+        {
+            "device": "cuda:0",
+            "required_gpu_name": "NVIDIA GeForce RTX 4080",
+            "cublas_workspace_config": ":8192:8",
+            "allow_tf32": False,
+            "precision": "32-true",
+        },
+    ],
+)
+def test_v2_rejects_nonregistered_execution_mapping(execution) -> None:
+    with pytest.raises(ValueError):
+        BenchmarkV2Settings(execution=execution)
+
+
+def test_v2_cpu_execution_is_available_only_as_explicit_fixture() -> None:
+    try:
+        from hcp.benchmark_batch import NeuralExecution
+    except ImportError:
+        pytest.fail("benchmark batch contracts are not implemented")
+
+    assert NeuralExecution.cpu().device == "cpu"
+    with pytest.raises(ValueError):
+        BenchmarkV2Settings(execution=NeuralExecution.cpu())
 
 
 def test_invalid_protocol_and_v2_settings_fail_before_forecasting() -> None:
