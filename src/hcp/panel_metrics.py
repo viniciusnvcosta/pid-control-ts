@@ -108,13 +108,18 @@ def v2_node_metrics(
         and the fraction of weeks with strictly crossed (empty) final bounds.
         Legacy widths remain signed spans and scores remain quantile-pair loss.
     """
-    values = node_metrics(y, lo, hi, scale, alpha=alpha, window=window)
-    _, lo, hi = np.broadcast_arrays(y, lo, hi)
+    y, lo, hi = np.broadcast_arrays(y, lo, hi)
+    values = evaluate_batch(y, lo, hi, alpha=alpha, window=window)
+    scale = np.asarray(scale, dtype=float)
+    scale_shape = (len(scale),) + (1,) * (values["interval_score"].ndim - 1)
+    broadcast_scale = scale.reshape(scale_shape)
+    values["scaled_mean_width"] = values["mean_width"] / broadcast_scale
+    values["scaled_interval_score"] = values["interval_score"] / broadcast_scale
     values["marginal_coverage_error"] = np.abs(
         values["marginal_coverage"] - (1 - alpha)
     )
     values["mean_set_width"] = np.maximum(hi - lo, 0.0).mean(axis=-1)
-    values["scaled_mean_set_width"] = values["mean_set_width"] / scale
+    values["scaled_mean_set_width"] = values["mean_set_width"] / broadcast_scale
     values["empty_set_rate"] = (lo > hi).mean(axis=-1)
     return values
 
