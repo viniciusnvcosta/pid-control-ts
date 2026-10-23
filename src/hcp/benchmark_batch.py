@@ -224,3 +224,66 @@ class ProgressSnapshot:
         ):
             raise ValueError("per-model counts must be non-negative integers")
         object.__setattr__(self, "per_model", MappingProxyType(counts))
+
+
+@dataclass(frozen=True)
+class DeviceProvenance:
+    """Exact configured device provenance used to authorize CUDA execution."""
+
+    device: str
+    device_index: int
+    gpu_uuid: str
+    gpu_name: str
+    compute_capability: tuple[int, int]
+    driver_version: str
+    torch_version: str
+    cuda_version: str
+    deterministic_algorithms: bool
+    matmul_allow_tf32: bool
+    cudnn_allow_tf32: bool
+    float32_matmul_precision: str
+    cublas_workspace_config: str
+
+
+def device_identity(
+    execution: NeuralExecution,
+    torch_module: object,
+    nvidia_identity: Mapping[str, str],
+) -> DeviceProvenance:
+    """Normalize configured device properties without environment or process I/O.
+
+    Args:
+        execution: Registered neural settings.
+        torch_module: Configured Torch boundary.
+        nvidia_identity: NVIDIA driver versions keyed by GPU UUID.
+
+    Raises:
+        ValueError: If selected GPU provenance or deterministic settings differ.
+    """
+    if execution.device != "cuda:0":
+        raise ValueError("device identity requires registered CUDA execution")
+    properties = torch_module.cuda.get_device_properties(0)
+    gpu_uuid = str(properties.uuid)
+    driver = nvidia_identity.get(gpu_uuid, "")
+    if not driver:
+        raise ValueError("NVIDIA driver identity missing for selected GPU UUID")
+    if properties.name != execution.required_gpu_name:
+        raise ValueError("selected GPU differs from registered GPU")
+    result = DeviceProvenance(
+        execution.device, 0, gpu_uuid, properties.name,
+        tuple(torch_module.cuda.get_device_capability(0)), driver,
+        str(torch_module.__version__), str(torch_module.version.cuda),
+        torch_module.are_deterministic_algorithms_enabled(),
+        torch_module.backends.cuda.matmul.allow_tf32,
+        torch_module.backends.cudnn.allow_tf32,
+        torch_module.get_float32_matmul_precision(),
+        execution.cublas_workspace_config,
+    )
+    if (
+        not result.deterministic_algorithms
+        or torch_module.is_deterministic_algorithms_warn_only_enabled()
+        or result.matmul_allow_tf32 or result.cudnn_allow_tf32
+        or result.float32_matmul_precision != "highest"
+    ):
+        raise ValueError("deterministic CUDA settings could not be established")
+    return result

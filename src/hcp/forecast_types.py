@@ -1,8 +1,8 @@
 # ABOUTME: Immutable native forecast contracts shared by benchmark adapters.
 # ABOUTME: Owns protected payload storage and preserves legacy model settings imports.
-from __future__ import annotations
-
 """In-memory forecast contracts with defensive array ownership."""
+
+from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field

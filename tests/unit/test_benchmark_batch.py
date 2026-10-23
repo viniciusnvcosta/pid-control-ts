@@ -158,3 +158,21 @@ def test_neural_execution_cpu_fixture_contract() -> None:
         allow_tf32=False,
         precision="32-true",
     )
+
+
+def test_forecast_types_has_module_docstring():
+    import hcp.forecast_types as module
+    assert module.__doc__ == "In-memory forecast contracts with defensive array ownership."
+
+
+def test_device_identity_is_pure_and_rejects_missing_driver():
+    from types import SimpleNamespace
+    api = _contract_api()
+    probe = getattr(api, "device_identity", None)
+    assert probe is not None, "pure device identity normalization is absent"
+    execution = api.NeuralExecution("cuda:0", "NVIDIA GeForce RTX 4080", ":4096:8", False, "32-true")
+    torch = SimpleNamespace(cuda=SimpleNamespace(
+        get_device_properties=lambda index: SimpleNamespace(name=execution.required_gpu_name, uuid="GPU-test"),
+        get_device_capability=lambda index: (8, 9)))
+    with pytest.raises(ValueError, match="driver"):
+        probe(execution, torch, {})
