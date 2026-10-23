@@ -285,6 +285,7 @@ def benchmark_configs(cfg: RunConfig) -> tuple[ForecastConfig, BenchmarkConfig]:
             reference_model=settings.reference_model,
             min_eval_weeks=settings.min_eval_weeks,
             seed_spawn_key=settings.evaluation_seed_spawn_key,
+            protocol_version=2,
         )
         return forecast, benchmark
     forecast_settings = ForecastSettings(
