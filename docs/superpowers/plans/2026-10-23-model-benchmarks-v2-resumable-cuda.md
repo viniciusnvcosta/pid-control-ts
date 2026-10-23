@@ -98,7 +98,7 @@ git commit -m "feat(benchmark): register deterministic CUDA execution"
 
 **Interfaces:**
 - Consumes: `NeuralExecution` from Task 1.
-- Produces: `DeviceProvenance`; pure `device_identity(execution: NeuralExecution, torch_module: object) -> DeviceProvenance`; run-owned `_configure_v2_cuda(execution: NeuralExecution) -> DeviceProvenance`.
+- Produces: `DeviceProvenance`; pure `device_identity(execution: NeuralExecution, torch_module: object, nvidia_identity: Mapping[str, str]) -> DeviceProvenance`; run-owned `_query_nvidia_identity(device_index: int) -> Mapping[str, str]` and `_configure_v2_cuda(execution: NeuralExecution) -> DeviceProvenance`.
 
 - [ ] **Step 1: Write failing device-gate tests**
 
@@ -153,9 +153,9 @@ Assert the three neural adapters receive `cuda:0`; Lightning gets `accelerator="
 
 - [ ] **Step 2: Run unit tests and verify RED**
 
-Run: `uv run pytest -o addopts='' tests/unit/test_forecast.py tests/unit/test_forecast_v2.py tests/unit/test_forecast_deepar.py tests/unit/test_forecast_transformer.py tests/unit/test_forecast_deepar_rollout.py -q`
+Run: `uv run pytest -o addopts='' tests/unit/test_forecast.py tests/unit/test_forecast_v2.py tests/unit/test_forecast_deepar.py tests/unit/test_forecast_transformer.py tests/unit/test_forecast_deepar_rollout.py tests/integration/test_forecast_models.py tests/integration/test_forecast_deepar_enhanced.py tests/integration/test_forecast_transformer_integration.py -q`
 
-Expected: FAIL on the missing fourth adapter argument and CPU-hardcoded trainers/tensors.
+Expected: FAIL on the missing fourth adapter argument and CPU-hardcoded trainers/tensors, including the real-CUDA assertions when run with GPU access.
 
 - [ ] **Step 3: Implement explicit device plumbing**
 
@@ -267,7 +267,7 @@ git commit -m "refactor(forecast): expose resumable origin batches"
 
 **Interfaces:**
 - Consumes: `ExecutionIdentity`, `OriginForecastBatch`, existing `_rename_noreplace`.
-- Produces: run-owned `_initialize_batch_workdir`, `_write_origin_batch`, `_read_origin_batch`, `_write_progress`, and `_append_runtime_event`; pure payload schemas/digests in `benchmark_batch.py`.
+- Produces: run-owned `_initialize_batch_workdir`, `_write_origin_batch`, `_read_origin_batch`, `_write_progress`, `_append_runtime_event`, and `_read_runtime_events`; pure payload schemas/digests in `benchmark_batch.py`.
 
 - [ ] **Step 1: Write failing atomicity and corruption tests**
 
