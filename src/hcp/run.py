@@ -346,7 +346,7 @@ def main(argv: list[str] | None = None) -> int:
             **generated.bundles,
             cfg.benchmark.reference_model: reference,
         }
-        result = run_benchmark(bundles, evaluation_cfg)
+        result = run_benchmark(bundles, evaluation_cfg, actuals=actuals)
         forecast_diagnostics = {
             **generated.diagnostics,
             "canonical_truth": {
