@@ -123,9 +123,21 @@ Phase 1 (`results/us-hier-v2`, see `docs/analysis/us-hier-v2.md`) found a null r
 single COVIDhub ensemble series. Phase 2 asks the same question across a panel of eligible
 forecasters × reconcilers × controllers: `uv run python -m hcp.run configs/panel_leaves.toml`.
 
-The D30 exploratory benchmark compares fixed probabilistic ARIMA, SARIMA, and DeepAR-style
-(Darts LSTM + Gaussian likelihood) forecasts with the COVIDhub reference, both before and
-after hierarchical reconciliation, under the same panel scoring and bootstrap protocol.
-Its pre-registered configuration is `configs/model_benchmarks.toml`; review and operating
-instructions are in `docs/development.md`, and results must not be launched or inspected
-before the D30 review gate is clean.
+The D30/D31 v1 exploratory benchmark compares fixed probabilistic ARIMA, SARIMA, and
+DeepAR-style (Darts LSTM + Gaussian likelihood) forecasts with the COVIDhub reference.
+Its registered configuration is `configs/model_benchmarks.toml`; the completed v1 result is
+reported in `docs/analysis/model-benchmarks-v1.md`.
+
+The cumulative v2 exploratory benchmark is separately registered by D32 and adds Prophet,
+Transformer, local L1 quantile regression, and an enhanced DeepAR-style model. It uses four
+principal arms and two declared Holm families; prior v1 outcomes informed its design, so v2
+remains exploratory. Protocol, review, verification, and limitations are recorded in
+`docs/analysis/model-benchmarks-v2-protocol-readiness.md`. Its prospective command is:
+
+```bash
+uv run python -m hcp.run configs/model_benchmarks_v2.toml
+```
+
+This command was not run during registration or review. Execute it only after a separate
+explicit launch authorization; the runner publishes once to
+`results/model-benchmarks-v2/` and never overwrites an existing result.
