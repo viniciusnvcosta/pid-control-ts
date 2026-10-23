@@ -76,3 +76,62 @@ def test_v2_adapter_retains_native_quantiles_and_warning_rows(monkeypatch) -> No
     assert set(result.base_forecasts.query("model == 'arima'")["source_kind"]) == {
         "sample_derived"
     }
+
+
+def test_v2_ineligible_origin_reserves_seed_before_v1_matched_origin(monkeypatch):
+    panel = _panel()
+    y = panel.y.copy()
+    y[:, :2] = np.nan
+    panel = panel.__class__(
+        dates=panel.dates, nodes=panel.nodes, y=y, observed=np.isfinite(y)
+    )
+    dates, forecast_dates = _grid(panel, 64, 66)
+    models = (
+        "arima",
+        "sarima",
+        "deepar",
+        "prophet",
+        "transformer",
+        "qr_l1",
+        "deepar_enhanced",
+    )
+    calls = {1: [], 2: []}
+
+    def adapter_for(model):
+        def adapter(histories, settings, seed):
+            version = 2 if isinstance(settings, V2ModelSettings) else 1
+            calls[version].append((model, seed.generate_state(4).tolist()))
+            samples = np.zeros((len(histories), 4, settings.n_samples))
+            if version == 2:
+                return NativePrediction(
+                    tuple(history.node for history in histories),
+                    4,
+                    "samples",
+                    samples=samples,
+                )
+            return samples
+
+        return adapter
+
+    for model in models:
+        monkeypatch.setitem(FORECASTERS, model, adapter_for(model))
+    settings = V2ModelSettings()
+    v2 = ForecastConfig(
+        models=models,
+        root_seed=3,
+        protocol_version=2,
+        settings=settings,
+        v2_settings=settings,
+    )
+    v2_result = generate_model_bundles(panel, dates, forecast_dates, v2)
+    generate_model_bundles(
+        panel,
+        dates,
+        forecast_dates,
+        ForecastConfig(models=models[:3], root_seed=3, settings=ForecastSettings()),
+    )
+
+    assert np.isnan(v2_result.bundles["arima"].q[:, 0]).all()
+    assert np.isfinite(v2_result.bundles["arima"].q[:, 1]).all()
+    assert [model for model, _ in calls[2]] == list(models)
+    assert calls[1] == calls[2][:3]
