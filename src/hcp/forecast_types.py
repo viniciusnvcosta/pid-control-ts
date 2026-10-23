@@ -1,5 +1,7 @@
 # ABOUTME: Immutable native forecast contracts shared by benchmark adapters.
 # ABOUTME: Owns protected payload storage and preserves legacy model settings imports.
+from __future__ import annotations
+
 """In-memory forecast contracts with defensive array ownership."""
 
 from collections.abc import Mapping
@@ -269,3 +271,12 @@ class DiagnosticsTables:
     def __post_init__(self) -> None:
         for name in ("forecast_diagnostics", "tuning", "quantile_repairs", "warnings"):
             object.__setattr__(self, name, getattr(self, name).copy(deep=True))
+
+    def copy(self) -> DiagnosticsTables:
+        """Return a new container that owns independent copies of every table."""
+        return DiagnosticsTables(
+            forecast_diagnostics=self.forecast_diagnostics,
+            tuning=self.tuning,
+            quantile_repairs=self.quantile_repairs,
+            warnings=self.warnings,
+        )

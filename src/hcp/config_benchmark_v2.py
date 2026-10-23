@@ -4,6 +4,7 @@
 
 from dataclasses import dataclass, field
 
+from hcp.benchmark_batch import NeuralExecution
 from hcp.data import FORECASTER
 from hcp.forecast_types import V2ModelSettings
 
@@ -35,6 +36,15 @@ class BenchmarkV2Settings:
     forecast_seed_spawn_key: tuple[int, ...] = (0,)
     evaluation_seed_spawn_key: tuple[int, ...] = (1,)
     model_settings: V2ModelSettings = field(default_factory=V2ModelSettings)
+    execution: NeuralExecution = field(
+        default_factory=lambda: NeuralExecution(
+            device="cuda:0",
+            required_gpu_name="NVIDIA GeForce RTX 4080",
+            cublas_workspace_config=":4096:8",
+            allow_tf32=False,
+            precision="32-true",
+        )
+    )
 
     def __post_init__(self) -> None:
         for name in (
@@ -48,6 +58,17 @@ class BenchmarkV2Settings:
             object.__setattr__(
                 self, "model_settings", V2ModelSettings(**self.model_settings)
             )
+        registered_execution = NeuralExecution(
+            device="cuda:0",
+            required_gpu_name="NVIDIA GeForce RTX 4080",
+            cublas_workspace_config=":4096:8",
+            allow_tf32=False,
+            precision="32-true",
+        )
+        if isinstance(self.execution, dict):
+            object.__setattr__(self, "execution", NeuralExecution(**self.execution))
+        if self.execution != registered_execution:
+            raise ValueError("v2 execution must match the registered CUDA contract")
         if self.protocol_version != 2:
             raise ValueError("BenchmarkV2Settings requires protocol_version=2")
         if self.models != V2_MODELS:
