@@ -172,3 +172,99 @@ def test_v2_writer_rejects_sha_change_and_cleans_owned_staging(
         )
     assert not (cfg.output_dir / cfg.run_id).exists()
     assert not list(cfg.output_dir.glob(".*.partial"))
+
+
+def _cuda_torch(monkeypatch, *, available=True, count=1, name="NVIDIA GeForce RTX 4080", deterministic=True):
+    import os
+    import sys
+    from types import SimpleNamespace
+
+    def operation(value=None):
+        assert os.environ["CUBLAS_WORKSPACE_CONFIG"] == ":4096:8"
+        return value
+
+    state = SimpleNamespace(enabled=False)
+    def enable(enabled, *, warn_only):
+        assert warn_only is False
+        if not deterministic:
+            raise RuntimeError("deterministic initialization failed")
+        state.enabled = enabled
+
+    fake = SimpleNamespace(
+        __version__="2.8.0",
+        version=SimpleNamespace(cuda="12.8"),
+        cuda=SimpleNamespace(
+            is_available=lambda: operation(available),
+            device_count=lambda: operation(count),
+            set_device=lambda index: operation(index),
+            get_device_properties=lambda index: SimpleNamespace(name=name, uuid="GPU-test"),
+            get_device_capability=lambda index: (8, 9),
+        ),
+        backends=SimpleNamespace(
+            cuda=SimpleNamespace(matmul=SimpleNamespace(allow_tf32=True)),
+            cudnn=SimpleNamespace(allow_tf32=True),
+        ),
+        set_float32_matmul_precision=lambda value: setattr(state, "precision", value),
+        get_float32_matmul_precision=lambda: state.precision,
+        use_deterministic_algorithms=enable,
+        are_deterministic_algorithms_enabled=lambda: state.enabled,
+        is_deterministic_algorithms_warn_only_enabled=lambda: False,
+    )
+    monkeypatch.setitem(sys.modules, "torch", fake)
+    monkeypatch.setattr(run_module, "_query_nvidia_identity",
+                        lambda index: {"GPU-test": "570.1"}, raising=False)
+    return fake
+
+
+def _execution():
+    from hcp.benchmark_batch import NeuralExecution
+    return NeuralExecution("cuda:0", "NVIDIA GeForce RTX 4080", ":4096:8", False, "32-true")
+
+
+def test_cuda_gate_captures_exact_runtime(monkeypatch):
+    fake = _cuda_torch(monkeypatch)
+    gate = getattr(run_module, "_configure_v2_cuda", None)
+    assert gate is not None, "CUDA launch gate is absent"
+    provenance = gate(_execution())
+    assert provenance.device == "cuda:0"
+    assert provenance.device_index == 0
+    assert provenance.gpu_uuid == "GPU-test"
+    assert provenance.gpu_name == "NVIDIA GeForce RTX 4080"
+    assert provenance.compute_capability == (8, 9)
+    assert provenance.driver_version == "570.1"
+    assert provenance.torch_version == "2.8.0"
+    assert provenance.cuda_version == "12.8"
+    assert provenance.deterministic_algorithms is True
+    assert provenance.matmul_allow_tf32 is False
+    assert provenance.cudnn_allow_tf32 is False
+    assert provenance.float32_matmul_precision == "highest"
+    assert provenance.cublas_workspace_config == ":4096:8"
+    assert fake.backends.cuda.matmul.allow_tf32 is False
+
+
+@pytest.mark.parametrize("kwargs,match", [
+    ({"available": False}, "CUDA"),
+    ({"count": 2}, "one visible"),
+    ({"name": "other GPU"}, "GPU"),
+    ({"deterministic": False}, "deterministic"),
+])
+def test_cuda_gate_fails_closed(monkeypatch, kwargs, match):
+    _cuda_torch(monkeypatch, **kwargs)
+    gate = getattr(run_module, "_configure_v2_cuda", None)
+    assert gate is not None, "CUDA launch gate is absent"
+    with pytest.raises(RuntimeError, match=match):
+        gate(_execution())
+
+
+def test_nvidia_query_matches_visible_uuid_not_physical_index(monkeypatch):
+    from types import SimpleNamespace
+    calls = []
+    def query(args, **kwargs):
+        calls.append(args)
+        return SimpleNamespace(returncode=0, stdout="GPU-other, 570.1\nGPU-test, 570.1\n")
+    monkeypatch.setattr(run_module.subprocess, "run", query)
+    probe = getattr(run_module, "_query_nvidia_identity", None)
+    assert probe is not None, "NVIDIA identity probe is absent"
+    result = probe(0)
+    assert result == {"GPU-other": "570.1", "GPU-test": "570.1"}
+    assert "--query-gpu=uuid,driver_version" in calls[0]

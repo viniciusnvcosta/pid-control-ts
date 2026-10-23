@@ -24,6 +24,7 @@ import platform
 import shutil
 import subprocess
 import uuid
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -34,6 +35,7 @@ from matplotlib import pyplot as plt
 
 # RunConfig, load_config and panel_config are re-exported as part of the run API.
 from hcp.benchmark import BenchmarkResult, run_benchmark
+from hcp.benchmark_batch import DeviceProvenance, NeuralExecution, device_identity
 from hcp.benchmark_data import canonical_actuals, reference_bundle
 from hcp.benchmark_report import benchmark_figures
 from hcp.config import (
@@ -56,6 +58,69 @@ from hcp.forecast import generate_model_bundles
 from hcp.panel import PRIMARY as PANEL_PRIMARY
 from hcp.panel import PanelResult, run_panel
 from hcp.report import render_figures, render_panel_figures
+
+
+def _query_nvidia_identity(device_index: int) -> Mapping[str, str]:
+    """Query driver versions by UUID, independent of CUDA visibility ordering.
+
+    Args:
+        device_index: Registered visible device index.
+
+    Raises:
+        RuntimeError: If the driver query fails or returns ambiguous identities.
+    """
+    if device_index != 0:
+        raise RuntimeError("only CUDA device zero is registered")
+    try:
+        completed = subprocess.run(
+            ["nvidia-smi", "--query-gpu=uuid,driver_version",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, check=False, timeout=10,
+        )
+        if completed.returncode:
+            raise RuntimeError("NVIDIA identity query failed")
+        identities = {}
+        for line in completed.stdout.splitlines():
+            gpu_uuid, driver = (item.strip() for item in line.split(","))
+            if not gpu_uuid or not driver or gpu_uuid in identities:
+                raise ValueError("missing or duplicate NVIDIA identity")
+            identities[gpu_uuid] = driver
+        if not identities:
+            raise ValueError("empty NVIDIA identity")
+        return identities
+    except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
+        raise RuntimeError("NVIDIA identity query failed") from exc
+
+
+def _configure_v2_cuda(execution: NeuralExecution) -> DeviceProvenance:
+    """Establish strict registered CUDA settings before forecasting.
+
+    Args:
+        execution: Registered neural device and precision settings.
+
+    Raises:
+        RuntimeError: If CUDA hardware or deterministic initialization fails.
+    """
+    if execution.device != "cuda:0" or execution.cublas_workspace_config != ":4096:8":
+        raise RuntimeError("registered CUDA execution settings are required")
+    os.environ["CUBLAS_WORKSPACE_CONFIG"] = execution.cublas_workspace_config
+    import torch  # noqa: PLC0415 - cuBLAS environment must precede Torch initialization.
+
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA is unavailable")
+    if torch.cuda.device_count() != 1:
+        raise RuntimeError("CUDA requires exactly one visible device")
+    if torch.cuda.get_device_properties(0).name != execution.required_gpu_name:
+        raise RuntimeError("selected GPU differs from registered GPU")
+    try:
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
+        torch.set_float32_matmul_precision("highest")
+        torch.use_deterministic_algorithms(True, warn_only=False)
+        torch.cuda.set_device(0)
+        return device_identity(execution, torch, _query_nvidia_identity(0))
+    except (RuntimeError, ValueError) as exc:
+        raise RuntimeError(f"deterministic CUDA initialization failed: {exc}") from exc
 
 
 def _git(*args: str) -> str:
