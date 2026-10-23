@@ -39,7 +39,7 @@ def _grid(panel: ActualPanel, start: int, stop: int) -> tuple[np.ndarray, np.nda
     return dates, dates - np.timedelta64(26, "D")
 
 
-def _literal_adapter(histories, settings, seed):
+def _literal_adapter(histories, settings, seed, execution):
     samples = np.empty((len(histories), settings.ahead, settings.n_samples))
     for node, history in enumerate(histories):
         for horizon in range(settings.ahead):
@@ -56,9 +56,9 @@ def test_generation_is_causal_interpolates_prefix_and_uses_horizon_four(
     dates, forecast_dates = _grid(panel, 64, 65)
     seen = []
 
-    def recording_adapter(histories, settings, seed):
+    def recording_adapter(histories, settings, seed, execution):
         seen.append(histories)
-        return _literal_adapter(histories, settings, seed)
+        return _literal_adapter(histories, settings, seed, execution)
 
     monkeypatch.setitem(FORECASTERS, "literal", recording_adapter)
 
@@ -101,9 +101,9 @@ def test_configuration_order_controls_models_and_origin_seeds(monkeypatch) -> No
     calls = []
 
     def adapter(name):
-        def run(histories, settings, seed):
+        def run(histories, settings, seed, execution):
             calls.append((name, int(seed.generate_state(1)[0])))
-            return _literal_adapter(histories, settings, seed)
+            return _literal_adapter(histories, settings, seed, execution)
 
         return run
 
@@ -193,7 +193,9 @@ def test_invalid_adapter_shape_raises(monkeypatch) -> None:
     panel = _panel()
     dates, forecast_dates = _grid(panel, 64, 65)
     monkeypatch.setitem(
-        FORECASTERS, "literal", lambda histories, settings, seed: np.zeros((1, 4, 7))
+        FORECASTERS,
+        "literal",
+        lambda histories, settings, seed, execution: np.zeros((1, 4, 7)),
     )
     with pytest.raises(ValueError, match="shape"):
         generate_model_bundles(panel, dates, forecast_dates, _config())
@@ -214,7 +216,7 @@ def test_nonfinite_or_failed_adapter_aborts_generation(
     panel = _panel()
     dates, forecast_dates = _grid(panel, 64, 65)
 
-    def bad_adapter(histories, settings, seed):
+    def bad_adapter(histories, settings, seed, execution):
         if failure == "exception":
             raise RuntimeError("fit failed")
         return np.full((len(histories), settings.ahead, settings.n_samples), np.nan)
@@ -282,7 +284,7 @@ def test_ineligible_origins_reserve_seed_slots(monkeypatch) -> None:
     panel = _panel()
     dates, forecast_dates = _grid(panel, 62, 66)
 
-    def adapter(histories, settings, seed):
+    def adapter(histories, settings, seed, execution):
         streams = neural_seed_streams(seed, 1)
         value = np.random.default_rng(streams["prediction"][0]).normal()
         return np.full((len(histories), settings.ahead, settings.n_samples), value)
@@ -306,7 +308,7 @@ def test_outer_history_preserves_raw_metadata_before_interpolation(monkeypatch) 
     panel = _panel(gaps=True)
     dates, forecast_dates = _grid(panel, 64, 65)
 
-    def adapter(histories, settings, seed):
+    def adapter(histories, settings, seed, execution):
         history = histories[1]
         assert history.raw_values is not None
         assert np.isnan(history.raw_values[9])
@@ -315,7 +317,7 @@ def test_outer_history_preserves_raw_metadata_before_interpolation(monkeypatch) 
         np.testing.assert_array_equal(
             history.forecast_dates, history.dates - np.timedelta64(26, "D")
         )
-        return _literal_adapter(histories, settings, seed)
+        return _literal_adapter(histories, settings, seed, execution)
 
     monkeypatch.setitem(FORECASTERS, "literal", adapter)
     generate_model_bundles(panel, dates, forecast_dates, _config())

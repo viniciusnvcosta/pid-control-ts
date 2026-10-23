@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
+from hcp.benchmark_batch import NeuralExecution
 from hcp.benchmark_data import ActualPanel
 from hcp.data import HierarchyBundle
 from hcp.forecast_classical import (
@@ -43,12 +44,17 @@ from hcp.forecast_types import (
 )
 
 ForecastAdapter = Callable[
-    [tuple[PreparedHistory, ...], ForecastSettings, np.random.SeedSequence],
+    [
+        tuple[PreparedHistory, ...],
+        ForecastSettings,
+        np.random.SeedSequence,
+        NeuralExecution,
+    ],
     np.ndarray | NativePrediction,
 ]
 
 
-def _arima_adapter(histories, settings, seed):
+def _arima_adapter(histories, settings, seed, execution):
     return (
         arima_prediction(histories, settings, seed)
         if isinstance(settings, V2ModelSettings)
@@ -56,7 +62,7 @@ def _arima_adapter(histories, settings, seed):
     )
 
 
-def _sarima_adapter(histories, settings, seed):
+def _sarima_adapter(histories, settings, seed, execution):
     return (
         sarima_prediction(histories, settings, seed)
         if isinstance(settings, V2ModelSettings)
@@ -64,8 +70,8 @@ def _sarima_adapter(histories, settings, seed):
     )
 
 
-def _deepar_adapter(histories, settings, seed):
-    samples = deepar_samples(histories, settings, seed)
+def _deepar_adapter(histories, settings, seed, execution):
+    samples = deepar_samples(histories, settings, seed, execution)
     if isinstance(settings, V2ModelSettings):
         return NativePrediction(
             tuple(h.node for h in histories), settings.ahead, "samples", samples=samples
@@ -73,13 +79,21 @@ def _deepar_adapter(histories, settings, seed):
     return samples
 
 
+def _prophet_adapter(histories, settings, seed, execution):
+    return prophet_prediction(histories, settings, seed)
+
+
+def _qr_adapter(histories, settings, seed, execution):
+    return qr_prediction(histories, settings, seed)
+
+
 FORECASTERS: dict[str, ForecastAdapter] = {
     "arima": _arima_adapter,
     "sarima": _sarima_adapter,
     "deepar": _deepar_adapter,
-    "prophet": prophet_prediction,
+    "prophet": _prophet_adapter,
     "transformer": transformer_prediction,
-    "qr_l1": qr_prediction,
+    "qr_l1": _qr_adapter,
     "deepar_enhanced": enhanced_deepar_prediction,
 }
 
@@ -97,6 +111,7 @@ class ForecastConfig:
     settings: ForecastSettings | V2ModelSettings = field(
         default_factory=ForecastSettings
     )
+    execution: NeuralExecution = field(default_factory=NeuralExecution.cpu)
     protocol_version: int = 1
     v2_settings: V2ModelSettings | None = None
 
@@ -224,7 +239,9 @@ def generate_model_bundles(
             try:
                 with warnings.catch_warnings(record=True) as caught:
                     warnings.simplefilter("always")
-                    output = adapter(histories, cfg.settings, origin_seed)
+                    output = adapter(
+                        histories, cfg.settings, origin_seed, cfg.execution
+                    )
             except Exception as exc:
                 raise RuntimeError(
                     f"model {model_name!r} failed at origin "

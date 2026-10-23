@@ -20,6 +20,7 @@ def test_legacy_config_keeps_v1_settings() -> None:
     assert isinstance(cfg.benchmark, BenchmarkSettings)
     forecast, _ = benchmark_configs(cfg)
     assert cfg.benchmark.models == ("arima", "sarima", "deepar")
+    assert forecast.execution.device == "cpu"
     assert forecast.protocol_version == 1
 
 
@@ -27,6 +28,7 @@ def test_v2_config_has_registered_order_and_defaults() -> None:
     cfg = load_config(ROOT_DIR / "configs/model_benchmarks_v2.toml")
     assert isinstance(cfg.benchmark, BenchmarkV2Settings)
     forecast, benchmark = benchmark_configs(cfg)
+    assert forecast.execution is cfg.benchmark.execution
     assert forecast.protocol_version == 2
     assert forecast.models == (
         "arima",

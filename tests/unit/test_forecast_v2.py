@@ -14,7 +14,7 @@ def test_v2_adapter_retains_native_quantiles_and_warning_rows(monkeypatch) -> No
     dates, forecast_dates = _grid(panel, 64, 65)
     seen = {1: [], 2: []}
 
-    def adapter(histories, settings, seed):
+    def adapter(histories, settings, seed, execution):
         version = 2 if isinstance(settings, V2ModelSettings) else 1
         seen[version].append(seed.generate_state(4).tolist())
         for _ in range(2):
@@ -98,7 +98,7 @@ def test_v2_ineligible_origin_reserves_seed_before_v1_matched_origin(monkeypatch
     calls = {1: [], 2: []}
 
     def adapter_for(model):
-        def adapter(histories, settings, seed):
+        def adapter(histories, settings, seed, execution):
             version = 2 if isinstance(settings, V2ModelSettings) else 1
             calls[version].append((model, seed.generate_state(4).tolist()))
             samples = np.zeros((len(histories), 4, settings.n_samples))
@@ -135,3 +135,72 @@ def test_v2_ineligible_origin_reserves_seed_before_v1_matched_origin(monkeypatch
     assert np.isfinite(v2_result.bundles["arima"].q[:, 1]).all()
     assert [model for model, _ in calls[2]] == list(models)
     assert calls[1] == calls[2][:3]
+
+
+def test_registry_classical_ignores_cuda_execution(monkeypatch):
+    from hcp import forecast
+    from hcp.benchmark_batch import NeuralExecution
+
+    execution = NeuralExecution(
+        "cuda:0", "NVIDIA GeForce RTX 4080", ":4096:8", False, "32-true"
+    )
+    for name, target in (
+        ("arima", "arima_samples"),
+        ("sarima", "sarima_samples"),
+        ("prophet", "prophet_prediction"),
+        ("qr_l1", "qr_prediction"),
+    ):
+        seen = []
+
+        def classical(histories, settings, seed, seen=seen):
+            seen.append(seed.spawn_key)
+            return "cpu result"
+
+        monkeypatch.setattr(forecast, target, classical)
+        assert (
+            forecast.FORECASTERS[name](
+                (), ForecastSettings(), np.random.SeedSequence(1), execution
+            )
+            == "cpu result"
+        )
+        assert seen == [()]
+
+
+def test_registered_execution_reaches_every_neural_adapter(monkeypatch):
+    from hcp.benchmark_batch import NeuralExecution
+
+    execution = NeuralExecution(
+        "cuda:0", "NVIDIA GeForce RTX 4080", ":4096:8", False, "32-true"
+    )
+    panel = _panel()
+    dates, origins = _grid(panel, 64, 65)
+    seen = []
+
+    def neural(histories, settings, seed, received):
+        seen.append(received)
+        return np.ones((len(histories), 4, settings.n_samples))
+
+    models = (
+        "arima",
+        "sarima",
+        "deepar",
+        "prophet",
+        "transformer",
+        "qr_l1",
+        "deepar_enhanced",
+    )
+    for name in models:
+        monkeypatch.setitem(FORECASTERS, name, neural)
+    generate_model_bundles(
+        panel,
+        dates,
+        origins,
+        ForecastConfig(
+            models=models,
+            settings=(settings := V2ModelSettings()),
+            v2_settings=settings,
+            protocol_version=2,
+            execution=execution,
+        ),
+    )
+    assert seen == [execution] * 7

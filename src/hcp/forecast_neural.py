@@ -10,6 +10,7 @@ from darts.models import RNNModel, TransformerModel
 from darts.models.forecasting.transformer_model import _TransformerModule
 from darts.utils.likelihood_models import GaussianLikelihood
 
+from hcp.benchmark_batch import NeuralExecution
 from hcp.forecast_neural_validation import select_neural
 from hcp.forecast_types import (
     ForecastSettings,
@@ -36,6 +37,7 @@ def deepar_samples(
     histories: tuple[PreparedHistory, ...],
     settings: ForecastSettings,
     seed: np.random.SeedSequence,
+    execution: NeuralExecution,
 ) -> np.ndarray:
     """Fit the legacy global Darts LSTM and return original-scale samples."""
     scales = np.array(
@@ -43,64 +45,59 @@ def deepar_samples(
     )
     series = [
         TimeSeries.from_times_and_values(
-            pd.DatetimeIndex(history.dates), history.values / scale
+            pd.DatetimeIndex(history.dates), (history.values / scale).astype(np.float32)
         )
         for history, scale in zip(histories, scales, strict=True)
     ]
     random_state = _seed_int(seed)
-    trainer = {
-        "accelerator": "cpu",
-        "devices": 1,
-        "deterministic": True,
-        "logger": False,
-        "enable_checkpointing": False,
-        "enable_progress_bar": False,
-        "enable_model_summary": False,
-    }
-    model = RNNModel(
-        model=settings.deepar_model,
-        input_chunk_length=settings.deepar_input_chunk_length,
-        training_length=settings.deepar_training_length,
-        hidden_dim=settings.deepar_hidden_dim,
-        n_rnn_layers=settings.deepar_n_rnn_layers,
-        dropout=settings.deepar_dropout,
-        likelihood=GaussianLikelihood(),
-        batch_size=settings.deepar_batch_size,
-        n_epochs=settings.deepar_n_epochs,
-        random_state=random_state,
-        save_checkpoints=False,
-        log_tensorboard=False,
-        show_warnings=False,
-        pl_trainer_kwargs=trainer,
-    )
-    loader = {"num_workers": 0}
-    model.fit(series, verbose=False, dataloader_kwargs=loader)
-    predicted = model.predict(
-        settings.ahead,
-        series=series,
-        num_samples=settings.n_samples,
-        verbose=False,
-        n_jobs=1,
-        dataloader_kwargs=loader,
-        random_state=random_state,
-    )
-    forecasts = [predicted] if isinstance(predicted, TimeSeries) else predicted
-    samples = []
-    expected = (settings.ahead, 1, settings.n_samples)
-    for history, forecast, scale in zip(histories, forecasts, scales, strict=True):
-        values = forecast.all_values(copy=False)
-        if values.shape != expected:
-            raise ValueError(
-                f"{history.node} returned samples with shape {values.shape}, "
-                f"expected {expected}"
-            )
-        node_samples = values[:, 0, :] * scale
-        if not np.isfinite(node_samples).all():
-            raise ValueError(f"{history.node} returned non-finite forecast samples")
-        samples.append(node_samples)
-    result = np.stack(samples, axis=0)
-    result.setflags(write=False)
-    return result
+    trainer = _trainer(execution)
+    trainer.pop("num_sanity_val_steps")
+    with torch.random.fork_rng(devices=[0] if execution.device == "cuda:0" else []):
+        torch.manual_seed(random_state)
+        model = RNNModel(
+            model=settings.deepar_model,
+            input_chunk_length=settings.deepar_input_chunk_length,
+            training_length=settings.deepar_training_length,
+            hidden_dim=settings.deepar_hidden_dim,
+            n_rnn_layers=settings.deepar_n_rnn_layers,
+            dropout=settings.deepar_dropout,
+            likelihood=GaussianLikelihood(),
+            batch_size=settings.deepar_batch_size,
+            n_epochs=settings.deepar_n_epochs,
+            random_state=random_state,
+            save_checkpoints=False,
+            log_tensorboard=False,
+            show_warnings=False,
+            pl_trainer_kwargs=trainer,
+        )
+        loader = {"num_workers": 0, "pin_memory": False}
+        model.fit(series, verbose=False, dataloader_kwargs=loader)
+        predicted = model.predict(
+            settings.ahead,
+            series=series,
+            num_samples=settings.n_samples,
+            verbose=False,
+            n_jobs=1,
+            dataloader_kwargs=loader,
+            random_state=random_state,
+        )
+        forecasts = [predicted] if isinstance(predicted, TimeSeries) else predicted
+        samples = []
+        expected = (settings.ahead, 1, settings.n_samples)
+        for history, forecast, scale in zip(histories, forecasts, scales, strict=True):
+            values = forecast.all_values(copy=False)
+            if values.shape != expected:
+                raise ValueError(
+                    f"{history.node} returned samples with shape {values.shape}, "
+                    f"expected {expected}"
+                )
+            node_samples = values[:, 0, :] * scale
+            if not np.isfinite(node_samples).all():
+                raise ValueError(f"{history.node} returned non-finite forecast samples")
+            samples.append(node_samples)
+        result = np.stack(samples, axis=0)
+        result.setflags(write=False)
+        return result
 
 
 class _PersistentTransformerModule(_TransformerModule):
@@ -145,11 +142,13 @@ class TransformerCandidate:
         histories: tuple[PreparedHistory, ...],
         settings: V2ModelSettings,
         seed: np.random.SeedSequence,
+        execution: NeuralExecution,
     ):
         histories = _trim_unavailable_tail(histories)
         if not histories:
             raise ValueError("Transformer requires nonempty histories")
         self.histories, self.settings = tuple(histories), settings
+        self.execution = execution
         self.split = _split(histories)
         self.best_state = None
         self._build(self.split.training_cutoff, seed)
@@ -164,7 +163,9 @@ class TransformerCandidate:
         self.series = _series(self.prefixes, self.scales)
         torch.set_num_threads(1)
         torch.use_deterministic_algorithms(True)
-        with torch.random.fork_rng(devices=[]):
+        with torch.random.fork_rng(
+            devices=[0] if self.execution.device == "cuda:0" else []
+        ):
             torch.manual_seed(_seed_int(initialization))
             model_cls = (
                 _PersistentTransformer
@@ -191,7 +192,7 @@ class TransformerCandidate:
                 save_checkpoints=False,
                 log_tensorboard=False,
                 show_warnings=False,
-                pl_trainer_kwargs=_trainer(),
+                pl_trainer_kwargs=_trainer(self.execution),
             )
         self.epochs_trained = 0
 
@@ -269,6 +270,7 @@ def transformer_prediction(
     histories: tuple[PreparedHistory, ...],
     settings: V2ModelSettings,
     seed: np.random.SeedSequence,
+    execution: NeuralExecution,
 ) -> NativePrediction:
     """Select/refit the fixed global Transformer and return seeded native paths."""
     histories = _trim_unavailable_tail(histories)
@@ -279,7 +281,7 @@ def transformer_prediction(
     try:
         with warnings.capture(32, "construction"):
             candidate = TransformerCandidate(
-                histories, settings, streams["training"][0]
+                histories, settings, streams["training"][0], execution
             )
         inner_scales = candidate.scales.copy()
         wrapped = WarningCandidate(candidate, 32, warnings)
@@ -365,10 +367,11 @@ def _trim_unavailable_tail(
     )
 
 
-def _trainer():
+def _trainer(execution: NeuralExecution):
     return {
-        "accelerator": "cpu",
-        "devices": 1,
+        "accelerator": "gpu" if execution.device == "cuda:0" else "cpu",
+        "devices": [0] if execution.device == "cuda:0" else 1,
+        "precision": execution.precision,
         "deterministic": True,
         "logger": False,
         "enable_checkpointing": False,
@@ -380,7 +383,9 @@ def _trainer():
 
 def _series(histories, scales):
     return [
-        TimeSeries.from_times_and_values(pd.DatetimeIndex(h.dates), h.values / s)
+        TimeSeries.from_times_and_values(
+            pd.DatetimeIndex(h.dates), (h.values / s).astype(np.float32)
+        )
         for h, s in zip(histories, scales, strict=True)
     ]
 

@@ -11,6 +11,7 @@ from pytorch_lightning import Trainer
 from torch import nn
 from torch.utils.data import DataLoader
 
+from hcp.benchmark_batch import NeuralExecution
 from hcp.forecast_deepar_data import (
     CovariateTransform,
     EnhancedWindowDataset,
@@ -87,6 +88,7 @@ class EnhancedCandidate:
         settings: V2ModelSettings,
         width: int,
         seed: np.random.SeedSequence,
+        execution: NeuralExecution,
     ):
         if not histories or width not in settings.enhanced_hidden_dims:
             raise ValueError(
@@ -94,6 +96,7 @@ class EnhancedCandidate:
             )
         split = _enhanced_split(histories)
         self.histories, self.settings, self.width = tuple(histories), settings, width
+        self.execution = execution
         self.best_state: dict[str, torch.Tensor] | None = None
         self._build(split.training_cutoff, seed)
 
@@ -105,7 +108,9 @@ class EnhancedCandidate:
         self.scales = np.array([1.0 + np.mean(np.abs(h.values)) for h in self.prefixes])
         self.scales.setflags(write=False)
         self.transforms = tuple(CovariateTransform.fit(h) for h in self.prefixes)
-        with torch.random.fork_rng(devices=[]):
+        with torch.random.fork_rng(
+            devices=[0] if self.execution.device == "cuda:0" else []
+        ):
             torch.manual_seed(seed_integer(initialization))
             self.module = EnhancedRNNModule(
                 len(self.histories), self.width, self.settings.neural_learning_rate
@@ -134,8 +139,9 @@ class EnhancedCandidate:
         """Train one further epoch; preserve weights, Adam moments, and sampler RNG."""
         self.module.train()
         trainer = Trainer(
-            accelerator="cpu",
-            devices=1,
+            accelerator="gpu" if self.execution.device == "cuda:0" else "cpu",
+            devices=[0] if self.execution.device == "cuda:0" else 1,
+            precision=self.execution.precision,
             max_epochs=1,
             deterministic=True,
             logger=False,
@@ -145,6 +151,8 @@ class EnhancedCandidate:
             num_sanity_val_steps=0,
         )
         trainer.fit(self.module, train_dataloaders=self.loader)
+        # Lightning teardown returns weights to CPU; validation keeps the device contract.
+        self.module.to(self.execution.device)
         loss = trainer.callback_metrics.get("train_loss")
         if (
             loss is None
@@ -182,6 +190,7 @@ class EnhancedCandidate:
                 self.scales,
                 self.settings.n_samples,
                 child,
+                self.execution,
             )
             truth = np.array(
                 [h.raw_values[np.searchsorted(h.dates, target)] for h in self.histories]
@@ -207,6 +216,7 @@ class EnhancedCandidate:
             self.scales,
             self.settings.n_samples,
             seed,
+            self.execution,
         )
         return paths
 
@@ -216,6 +226,7 @@ def make_enhanced_candidate(
     settings: V2ModelSettings,
     width: int,
     seed: np.random.SeedSequence,
+    execution: NeuralExecution,
 ) -> EnhancedCandidate:
     """Construct an inner-fit candidate from its reserved training seed child.
 
@@ -224,11 +235,12 @@ def make_enhanced_candidate(
         settings: Registered settings (reduced sample budgets allowed in fixtures).
         width: Architecture width in the configured ascending candidate grid.
         seed: Candidate-training child; never pass the outer origin seed here.
+        execution: Explicit neural device and full-precision contract.
 
     Returns:
         A candidate supporting selection, full refit, and seeded native prediction.
     """
-    return EnhancedCandidate(histories, settings, width, seed)
+    return EnhancedCandidate(histories, settings, width, seed, execution)
 
 
 def _enhanced_split(histories: tuple[PreparedHistory, ...]) -> TemporalSplit:
@@ -272,6 +284,7 @@ def enhanced_deepar_prediction(
     histories: tuple[PreparedHistory, ...],
     settings: V2ModelSettings,
     seed: np.random.SeedSequence,
+    execution: NeuralExecution,
 ) -> NativePrediction:
     """Select a recurrent width/epoch and forecast from an independent full refit.
 
@@ -280,6 +293,7 @@ def enhanced_deepar_prediction(
             Synthetic fixtures may use fewer nodes than the registered 57.
         settings: Model defaults or explicitly reduced development budgets.
         seed: Reserved model/origin seed, allocated once into 2*N+2 children.
+        execution: Explicit neural device and full-precision contract.
 
     Returns:
         Protected native paths and candidate, refit, stream, and warning evidence.
@@ -312,7 +326,7 @@ def enhanced_deepar_prediction(
         for width, training_child in zip(widths, streams["training"], strict=True):
             with collector.capture(width, "construction"):
                 candidate = make_enhanced_candidate(
-                    histories, settings, width, training_child
+                    histories, settings, width, training_child, execution
                 )
             candidates.append(candidate)
             inner.append(_fit_diagnostics(candidate))
