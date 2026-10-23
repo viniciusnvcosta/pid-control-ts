@@ -150,3 +150,16 @@ overwrite an existing run. Copy the relevant TOML file and choose a new `run_id`
 rerun. The probabilistic benchmark is CPU-heavy because ARIMA and SARIMA are refit for every
 node and weekly origin and DeepAR trains deterministically on CPU; see the development guide
 for focused checks, runtime guidance, stderr review, and artifact details.
+
+The cumulative v2 exploratory benchmark is separately registered by D32 and adds Prophet,
+Transformer, local L1 quantile regression, and an enhanced DeepAR-style model. It uses four
+principal arms and two declared Holm families; prior v1 outcomes informed its design, so v2
+remains exploratory. Protocol, review, verification, and limitations are recorded in
+`docs/analysis/model-benchmarks-v2-protocol-readiness.md`. Its command is:
+
+```bash
+uv run python -m hcp.run configs/model_benchmarks_v2.toml
+```
+
+Run publication is immutable at `results/model-benchmarks-v2/`; an existing result is never
+overwritten.
