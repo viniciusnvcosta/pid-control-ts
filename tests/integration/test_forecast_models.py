@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from hcp import forecast_models
+from hcp import forecast_neural
 from hcp.forecast_models import (
     ForecastSettings,
     PreparedHistory,
@@ -92,13 +92,13 @@ def test_deepar_uses_cpu_deterministic_trainer_without_writes(
 ) -> None:
     settings = replace(ForecastSettings(), n_samples=7)
     constructor: dict[str, object] = {}
-    real_rnn_model = forecast_models.RNNModel
+    real_rnn_model = forecast_neural.RNNModel
 
     def recording_rnn_model(*args, **kwargs):
         constructor.update(kwargs)
         return real_rnn_model(*args, **kwargs)
 
-    monkeypatch.setattr(forecast_models, "RNNModel", recording_rnn_model)
+    monkeypatch.setattr(forecast_neural, "RNNModel", recording_rnn_model)
     monkeypatch.chdir(tmp_path)
 
     result = deepar_samples((_history(),), settings, np.random.SeedSequence(7))
