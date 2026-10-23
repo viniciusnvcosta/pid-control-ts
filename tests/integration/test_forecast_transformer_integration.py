@@ -19,15 +19,17 @@ def _histories(future_shift=0.0):
     for i in range(2):
         values = -np.arange(44, dtype=float) * (i + 1)
         values[40:] += future_shift
-        raw = PreparedHistory(
-            str(i),
-            dates,
-            values,
-            values,
-            np.ones(44, bool),
-            dates - np.timedelta64(26, "D"),
+        observed = np.arange(44) < 40
+        result.append(
+            PreparedHistory(
+                str(i),
+                dates,
+                values,
+                values,
+                observed,
+                dates - np.timedelta64(26, "D"),
+            )
         )
-        result.append(prepare_prefix(raw, dates[39] + np.timedelta64(2, "D")))
     return tuple(result)
 
 
@@ -46,6 +48,11 @@ def test_real_transformer_repeatability_future_invariance_and_fourth_step(
     settings = replace(
         V2ModelSettings(), neural_max_epochs=1, neural_patience=1, n_samples=8
     )
+    changed_histories = _histories(1e6)
+    assert np.all(
+        changed_histories[0].raw_values[40:] != _histories()[0].raw_values[40:]
+    )
+    assert not changed_histories[0].observed[40:].any()
     results = [
         neural.transformer_prediction(
             _histories(shift), settings, np.random.SeedSequence(81)
@@ -82,6 +89,7 @@ def test_real_two_epochs_preserve_adam_and_best_weights_and_score_direct_gaussia
     candidate = neural.TransformerCandidate(
         data, V2ModelSettings(), np.random.SeedSequence(82)
     )
+    data = candidate.histories
     candidate.train_epoch()
     optimizer = candidate.model.model.configure_optimizers()
     before = [value["step"].item() for value in optimizer.state.values()]

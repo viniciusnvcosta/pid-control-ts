@@ -4,6 +4,7 @@
 
 import importlib
 import importlib.util
+import warnings
 from dataclasses import replace
 
 import numpy as np
@@ -12,6 +13,28 @@ import torch
 
 from hcp.forecast_types import PreparedHistory, V2ModelSettings
 from hcp.forecast_validation import neural_split
+
+
+@pytest.fixture(scope="module")
+def _dependency_warnings():
+    records = []
+    yield records
+    assert len(records) == 32
+    messages = {str(warning.message) for warning in records}
+    assert messages == {
+        "Can't initialize NVML",
+        "You defined a `validation_step` but have no `val_dataloader`. Skipping val loop.",
+        "`isinstance(treespec, LeafSpec)` is deprecated, use `isinstance(treespec, TreeSpec) and treespec.is_leaf()` instead.",
+        "The 'train_dataloader' does not have many workers which may be a bottleneck. Consider increasing the value of the `num_workers` argument` to `num_workers=7` in the `DataLoader` to improve performance.",
+    }
+
+
+@pytest.fixture(autouse=True)
+def capture_direct_dependency_warnings(_dependency_warnings):
+    """Capture direct candidate warnings in each test without global filters."""
+    with warnings.catch_warnings(record=True) as captured:
+        yield
+    _dependency_warnings.extend(captured)
 
 
 def components():

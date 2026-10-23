@@ -10,18 +10,6 @@ import pytest
 
 from hcp.forecast_types import PreparedHistory, V2ModelSettings
 
-pytestmark = [
-    pytest.mark.filterwarnings(
-        "ignore:Maximum Likelihood optimization failed to converge"
-    ),
-    pytest.mark.filterwarnings(
-        "ignore:Non-stationary starting seasonal autoregressive"
-    ),
-    pytest.mark.filterwarnings(
-        "ignore:Non-stationary starting autoregressive parameters"
-    ),
-]
-
 
 def _histories() -> tuple[PreparedHistory, ...]:
     dates = pd.date_range("2020-01-04", periods=64, freq="7D").to_numpy()
@@ -146,6 +134,9 @@ def test_prophet_failure_retains_node_origin_and_cause(monkeypatch, stage):
 
 
 @pytest.mark.parametrize("name", ["arima", "sarima"])
+@pytest.mark.filterwarnings("ignore:Maximum Likelihood optimization failed to converge")
+@pytest.mark.filterwarnings("ignore:Non-stationary starting seasonal autoregressive")
+@pytest.mark.filterwarnings("ignore:Non-stationary starting autoregressive parameters")
 def test_classical_native_wrapper_preserves_legacy_stream_and_paths(name):
     adapter = import_module("hcp.forecast_classical")
     legacy = import_module("hcp.forecast_models")

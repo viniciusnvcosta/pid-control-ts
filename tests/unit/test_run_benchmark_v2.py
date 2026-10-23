@@ -53,13 +53,16 @@ def test_require_clean_git_fails_on_git_command_error(tmp_path: Path) -> None:
 
 def _cfg(tmp_path: Path) -> RunConfig:
     return RunConfig(
-        run_id="v2-test",
+        run_id="model-benchmarks-v2",
         root_seed=20261021,
-        data_path=tmp_path / "input.csv",
+        data_path=Path("data/deaths.csv"),
         output_dir=tmp_path / "results",
+        expected_sha256="cb4dccfd21d6c08b1247aa9a7c6a8d93f7c373871526cfcb4860df884b54ac06",
         design="benchmark",
         controllers=("raw", "pi", "pi_norm"),
         reconcilers=("none", "bottom_up", "mint_shrink", "mint_median"),
+        lr=0.1,
+        lr_grid=(0.1,),
         benchmark={"protocol_version": 2},
     )
 
