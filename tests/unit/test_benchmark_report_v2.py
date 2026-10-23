@@ -92,6 +92,7 @@ def result():
 
 def _labels(fig):
     labels = [fig._suptitle.get_text()] if fig._suptitle is not None else []
+    labels.extend(text.get_text() for text in fig.texts)
     for axes in fig.axes:
         labels.extend([axes.get_title(), axes.get_xlabel(), axes.get_ylabel()])
         labels.extend(text.get_text() for text in axes.texts)
@@ -106,6 +107,8 @@ def test_v2_report_exposes_all_arms_and_diagnostic_semantics(
 ):
     monkeypatch.chdir(tmp_path)
     figures = benchmark_figures(result, block=8, lr=0.1)
+    for figure in figures.values():
+        figure.canvas.draw()
     assert set(figures) == {
         "model-quality",
         "factorial-effects",
@@ -116,6 +119,15 @@ def test_v2_report_exposes_all_arms_and_diagnostic_semantics(
     all_labels = " ".join(map(_labels, figures.values())).lower()
     for arm in ("a", "b", "c", "d", "raw", "normalized pi"):
         assert arm in all_labels
+    arm_key = _labels(figures["model-quality"]).lower()
+    for mapping in (
+        "a = none / raw",
+        "b = none / normalized pi",
+        "c = mint_median / raw",
+        "d = mint_median / normalized pi",
+    ):
+        assert mapping in arm_key
+        assert mapping in _labels(figures["coverage-score-tradeoff"]).lower()
     assert "empty-set rate" in all_labels
     assert "physical" in all_labels and "signed span" in all_labels
     assert "pointwise" in all_labels and "holm" in all_labels
