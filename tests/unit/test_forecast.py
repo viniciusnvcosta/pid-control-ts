@@ -321,3 +321,113 @@ def test_outer_history_preserves_raw_metadata_before_interpolation(monkeypatch) 
 
     monkeypatch.setitem(FORECASTERS, "literal", adapter)
     generate_model_bundles(panel, dates, forecast_dates, _config())
+
+
+def test_split_plan_reserves_seeds_and_assembles_registered_order(monkeypatch):
+    from hcp import forecast
+
+    panel = _panel(gaps=True)
+    dates, origins = _grid(panel, 62, 66)
+    calls = []
+
+    def adapter(histories, settings, seed, execution):
+        calls.append((seed.spawn_key, execution))
+        value = float(seed.generate_state(1)[0])
+        return np.full((len(histories), 4, settings.n_samples), value)
+
+    monkeypatch.setitem(FORECASTERS, "alpha", adapter)
+    monkeypatch.setitem(FORECASTERS, "beta", adapter)
+    cfg = _config("beta", "alpha")
+    plan = forecast.plan_model_forecasts(panel, dates, origins, cfg)
+    assert plan.eligible_keys == (("beta", 2), ("beta", 3), ("alpha", 2), ("alpha", 3))
+    assert calls == []
+    batches = tuple(
+        forecast.generate_origin_batch(plan, *key, cfg) for key in plan.eligible_keys
+    )
+    assert calls == [
+        (cfg.seed_spawn_key + (m, i), cfg.execution) for m in range(2) for i in (2, 3)
+    ]
+    # A completed earlier origin and another model cannot advance this address.
+    later = forecast.generate_origin_batch(plan, "beta", 3, cfg)
+    np.testing.assert_array_equal(later.quantiles, batches[1].quantiles)
+    assert later.seed_spawn_key == cfg.seed_spawn_key + (0, 3)
+    split = forecast.assemble_model_bundles(plan, tuple(reversed(batches)), cfg)
+    wrapped = forecast.generate_model_bundles(panel, dates, origins, cfg)
+    assert tuple(split.bundles) == cfg.models
+    pd.testing.assert_frame_equal(split.base_forecasts, wrapped.base_forecasts)
+    for name in cfg.models:
+        np.testing.assert_array_equal(split.bundles[name].q, wrapped.bundles[name].q)
+        assert np.isnan(split.bundles[name].q[:, :2]).all()
+        summary = split.diagnostics["models"][name]
+        expected = wrapped.diagnostics["models"][name]
+        assert {k: v for k, v in summary.items() if k != "elapsed_seconds"} == {
+            k: v for k, v in expected.items() if k != "elapsed_seconds"
+        }
+        assert summary["elapsed_seconds"] == sum(
+            b.elapsed_seconds for b in batches if b.model == name
+        )
+    for name in ("forecast_diagnostics", "tuning", "quantile_repairs", "warnings"):
+        pd.testing.assert_frame_equal(
+            getattr(split.tables, name), getattr(wrapped.tables, name)
+        )
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        "missing",
+        "duplicate",
+        "origin",
+        "target",
+        "nodes",
+        "seed",
+        "model",
+        "index",
+        "nan",
+        "crossed",
+        "source",
+    ],
+)
+def test_split_assembly_rejects_invalid_batches(monkeypatch, corruption):
+    from hcp import forecast
+
+    panel = _panel()
+    dates, origins = _grid(panel, 64, 66)
+    monkeypatch.setitem(FORECASTERS, "literal", _literal_adapter)
+    cfg = _config()
+    plan = forecast.plan_model_forecasts(panel, dates, origins, cfg)
+    batches = tuple(
+        forecast.generate_origin_batch(plan, *key, cfg) for key in plan.eligible_keys
+    )
+    changes = {
+        "origin": {"origin": batches[0].origin + np.timedelta64(7, "D")},
+        "target": {"target": batches[0].target + np.timedelta64(7, "D")},
+        "nodes": {"nodes": tuple(reversed(panel.nodes))},
+        "seed": {"seed_spawn_key": (999,)},
+        "model": {"model": "wrong"},
+        "index": {"target_index": 99},
+        "nan": {"quantiles": np.full((2, 3), np.nan)},
+        "crossed": {"quantiles": np.tile([3.0, 2.0, 1.0], (2, 1))},
+        "source": {"source_kind": "native_quantiles"},
+    }
+    if corruption == "missing":
+        batches = batches[:1]
+    elif corruption == "duplicate":
+        batches += batches[:1]
+    else:
+        batches = (replace(batches[0], **changes[corruption]), batches[1])
+    with pytest.raises(ValueError):
+        forecast.assemble_model_bundles(plan, batches, cfg)
+
+
+def test_split_execution_rejects_ineligible_or_unknown_key(monkeypatch):
+    from hcp import forecast
+
+    panel = _panel()
+    dates, origins = _grid(panel, 62, 65)
+    monkeypatch.setitem(FORECASTERS, "literal", _literal_adapter)
+    cfg = _config()
+    plan = forecast.plan_model_forecasts(panel, dates, origins, cfg)
+    for key in (("literal", 0), ("literal", -1), ("literal", 99), ("missing", 2)):
+        with pytest.raises(ValueError):
+            forecast.generate_origin_batch(plan, *key, cfg)

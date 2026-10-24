@@ -7,10 +7,15 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import numpy as np
 import pandas as pd
+
+if TYPE_CHECKING:
+    from hcp.benchmark_data import ActualPanel
+    from hcp.data import HierarchyBundle
+    from hcp.forecast import ForecastConfig
 
 
 def _protected(values: np.ndarray) -> np.ndarray:
@@ -280,3 +285,50 @@ class DiagnosticsTables:
             quantile_repairs=self.quantile_repairs,
             warnings=self.warnings,
         )
+
+
+@dataclass(frozen=True)
+class ForecastPlan:
+    """Owned causal histories and registered model/origin execution order.
+
+    Target indices address the target grid, including ineligible origins. Seeds
+    use these original positions regardless of batch execution order.
+    """
+
+    actuals: ActualPanel
+    targets: np.ndarray
+    origins: np.ndarray
+    target_indices: np.ndarray
+    prepared: tuple[
+        tuple[tuple[PreparedHistory, ...], tuple[Mapping[str, object], ...]] | None, ...
+    ]
+    eligible_keys: tuple[tuple[str, int], ...]
+    config: ForecastConfig
+
+    def __post_init__(self) -> None:
+        for name in ("targets", "origins", "target_indices"):
+            object.__setattr__(self, name, _protected(getattr(self, name)))
+        object.__setattr__(
+            self,
+            "prepared",
+            tuple(
+                None
+                if item is None
+                else (
+                    tuple(item[0]),
+                    tuple(_frozen_diagnostics(record) for record in item[1]),
+                )
+                for item in self.prepared
+            ),
+        )
+        object.__setattr__(self, "eligible_keys", tuple(self.eligible_keys))
+
+
+@dataclass(frozen=True)
+class ForecastResult:
+    """Generated hierarchy bundles, long forecasts, and fit diagnostics."""
+
+    bundles: dict[str, HierarchyBundle]
+    base_forecasts: pd.DataFrame
+    diagnostics: dict
+    tables: DiagnosticsTables = field(default_factory=DiagnosticsTables)

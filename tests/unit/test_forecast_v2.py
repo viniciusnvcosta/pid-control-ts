@@ -204,3 +204,75 @@ def test_registered_execution_reaches_every_neural_adapter(monkeypatch):
         ),
     )
     assert seen == [execution] * 7
+
+
+def test_split_v2_preserves_native_diagnostics_and_source_labels(monkeypatch):
+    import pandas as pd
+
+    from hcp import forecast
+
+    panel = _panel()
+    dates, origins = _grid(panel, 64, 66)
+    models = tuple(FORECASTERS)
+    settings = V2ModelSettings()
+    cfg = ForecastConfig(
+        models=models, settings=settings, v2_settings=settings, protocol_version=2
+    )
+
+    def adapter(histories, settings, seed, execution):
+        warnings.warn("outer warning", UserWarning)
+        return NativePrediction(
+            tuple(h.node for h in histories),
+            4,
+            "quantiles",
+            quantiles=np.tile([1.0, 2.0, 3.0], (len(histories), 1)),
+            diagnostics={
+                "warning_counts": {"InnerWarning": 2},
+                "forecast_diagnostics": [
+                    {"node": "us", "phase": "refit", "name": "epochs", "value": 4}
+                ],
+                "tuning": [{"candidate": 1, "selected": True, "score": 2.0}],
+                "quantile_repairs": [
+                    {
+                        "node": "aa",
+                        "stage": "raw",
+                        "before": [3.0, 1.0, 2.0],
+                        "after": [1.0, 2.0, 3.0],
+                        "count": 1,
+                    }
+                ],
+                "warnings": [
+                    {
+                        "category": "InnerWarning",
+                        "message": "inner",
+                        "source": "adapter:1",
+                        "phase": "candidate",
+                        "count": 2,
+                    }
+                ],
+            },
+        )
+
+    for name in models:
+        monkeypatch.setitem(FORECASTERS, name, adapter)
+    plan = forecast.plan_model_forecasts(panel, dates, origins, cfg)
+    batches = tuple(
+        forecast.generate_origin_batch(plan, *key, cfg) for key in plan.eligible_keys
+    )
+    split = forecast.assemble_model_bundles(plan, tuple(reversed(batches)), cfg)
+    wrapped = forecast.generate_model_bundles(panel, dates, origins, cfg)
+    pd.testing.assert_frame_equal(split.base_forecasts, wrapped.base_forecasts)
+    for name in ("forecast_diagnostics", "tuning", "quantile_repairs", "warnings"):
+        pd.testing.assert_frame_equal(
+            getattr(split.tables, name), getattr(wrapped.tables, name)
+        )
+    assert split.diagnostics["models"]["arima"]["warning_counts"] == {
+        "InnerWarning": 4,
+        "UserWarning": 2,
+    }
+    assert set(split.base_forecasts.query("model == 'qr_l1'").source_kind) == {
+        "native_quantiles"
+    }
+    assert set(split.base_forecasts.query("model != 'qr_l1'").source_kind) == {
+        "sample_derived"
+    }
