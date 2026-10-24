@@ -701,3 +701,163 @@ def test_batch_rejects_coercible_identity_types(tmp_path, field, value):
     manifest.write_text(json.dumps(payload))
     with pytest.raises(ValueError):
         _read_batch(path, identity, batch)
+
+
+@pytest.mark.parametrize(
+    "event",
+    [
+        {"event": "ação 😀", "elapsed": 1.25, "estimate": -1.2e-125},
+        {
+            "event": "nested",
+            "data": [True, False, None, {"quote": '\\"', "number": 1.5e125}],
+        },
+    ],
+)
+def test_runtime_reader_accepts_every_writer_byte_truncation(tmp_path, event):
+    import json
+
+    run_module._append_runtime_event(tmp_path, {"event": "previous"})
+    prefix = (tmp_path / "runtime.jsonl").read_bytes()
+    run_module._append_runtime_event(tmp_path, event)
+    encoded = (tmp_path / "runtime.jsonl").read_bytes()[len(prefix) :]
+    for length in range(len(encoded) + 1):
+        (tmp_path / "runtime.jsonl").write_bytes(prefix + encoded[:length])
+        restored = run_module._read_runtime_events(tmp_path)
+        expected = ({"event": "previous"},)
+        try:
+            decoded = json.loads(encoded[:length])
+        except ValueError:
+            pass
+        else:
+            expected += (decoded,)
+        assert restored == expected, (length, encoded[:length])
+
+
+@pytest.mark.parametrize(
+    "fragment", [b'{"event":true}\xe2', b'{"event":true} \xf0\x9f']
+)
+def test_runtime_reader_rejects_complete_object_before_partial_utf8(tmp_path, fragment):
+    (tmp_path / "runtime.jsonl").write_bytes(fragment)
+    with pytest.raises(ValueError):
+        run_module._read_runtime_events(tmp_path)
+
+
+@pytest.mark.parametrize("value", ["1e999", "-1e999"])
+@pytest.mark.parametrize("template", ['{"event":%s}\n', '{"nested":[{"value":%s}]}\n'])
+def test_runtime_reader_rejects_overflowing_numbers(tmp_path, value, template):
+    (tmp_path / "runtime.jsonl").write_text(template % value)
+    with pytest.raises(ValueError):
+        run_module._read_runtime_events(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "component", ["workdir", "batches", "model", "state", "manifest"]
+)
+def test_batch_reader_rejects_symlinked_ancestors_and_metadata(tmp_path, component):
+    identity, batch = _storage_fixture()
+    work = tmp_path / "work"
+    run_module._initialize_batch_workdir(work, identity)
+    path = run_module._write_origin_batch(work, identity, batch)
+    selected = {
+        "workdir": work,
+        "batches": work / "batches",
+        "model": path.parent,
+        "state": work / "run-state.json",
+        "manifest": path / "batch.json",
+    }[component]
+    external = tmp_path / "external"
+    selected.rename(external)
+    selected.symlink_to(external, target_is_directory=external.is_dir())
+    with pytest.raises(ValueError):
+        _read_batch(path, identity, batch)
+
+
+@pytest.mark.parametrize("component", ["workdir", "batches", "model", "state"])
+def test_batch_writer_rejects_symlinked_ancestors_without_external_writes(
+    tmp_path, component
+):
+    identity, batch = _storage_fixture()
+    work = tmp_path / "work"
+    run_module._initialize_batch_workdir(work, identity)
+    external = tmp_path / "external"
+    if component == "workdir":
+        work.rename(external)
+        work.symlink_to(external, target_is_directory=True)
+    elif component == "state":
+        (work / "run-state.json").rename(external)
+        (work / "run-state.json").symlink_to(external)
+    else:
+        external.mkdir()
+        selected = work / "batches"
+        if component == "model":
+            selected.mkdir()
+            selected /= "arima"
+        selected.symlink_to(external, target_is_directory=True)
+    before = sorted(str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*"))
+    with pytest.raises(ValueError):
+        run_module._write_origin_batch(work, identity, batch)
+    assert sorted(str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*")) == before
+
+
+@pytest.mark.parametrize("operation", ["initialize", "progress", "append"])
+def test_other_storage_writers_reject_redirected_workdir(tmp_path, operation):
+    from hcp.benchmark_batch import ProgressSnapshot
+
+    external = tmp_path / "external"
+    external.mkdir()
+    work = tmp_path / "link" / "work"
+    work.parent.symlink_to(external, target_is_directory=True)
+    if operation != "initialize":
+        (external / "work").mkdir()
+    if operation == "initialize":
+        action = lambda: run_module._initialize_batch_workdir(
+            work, _storage_fixture()[0]
+        )
+    elif operation == "progress":
+        action = lambda: run_module._write_progress(
+            work, ProgressSnapshot(None, None, 0, 0, {}, 0.0, None)
+        )
+    else:
+        action = lambda: run_module._append_runtime_event(work, {"event": "test"})
+    before = sorted(str(p) for p in external.rglob("*"))
+    with pytest.raises(ValueError):
+        action()
+    assert sorted(str(p) for p in external.rglob("*")) == before
+
+
+@pytest.mark.parametrize("name", ["progress.json", "runtime.jsonl"])
+def test_advisory_writers_reject_symlinked_destination(tmp_path, name):
+    from hcp.benchmark_batch import ProgressSnapshot
+
+    work = tmp_path / "work"
+    work.mkdir()
+    external = tmp_path / "external"
+    external.write_text("preserved")
+    (work / name).symlink_to(external)
+    with pytest.raises(ValueError):
+        if name == "progress.json":
+            run_module._write_progress(
+                work, ProgressSnapshot(None, None, 0, 0, {}, 0.0, None)
+            )
+        else:
+            run_module._append_runtime_event(work, {"event": "test"})
+    assert external.read_text() == "preserved"
+
+
+@pytest.mark.parametrize(
+    "fragment",
+    [
+        b'{"event":"\\u0x',
+        b'{"event":1.e',
+        b'{"event":01',
+        b'{"event":1e++',
+        b'{"event":true} trailing',
+        b'{"event":[1,]}',
+        b'{"event":"bad\\x',
+        b'{"event":true,"nested":1e999',
+    ],
+)
+def test_runtime_reader_rejects_invalid_incomplete_object_prefixes(tmp_path, fragment):
+    (tmp_path / "runtime.jsonl").write_bytes(fragment)
+    with pytest.raises(ValueError):
+        run_module._read_runtime_events(tmp_path)

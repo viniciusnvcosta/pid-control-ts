@@ -50,6 +50,7 @@ from hcp.benchmark_batch import (
     validate_batch_metadata,
 )
 from hcp.benchmark_data import canonical_actuals, reference_bundle
+from hcp.benchmark_json import decode_runtime_object, incomplete_object_prefix
 from hcp.benchmark_report import benchmark_figures
 from hcp.config import (
     RunConfig,
@@ -700,8 +701,16 @@ def _compact_json(payload: object) -> str:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
 
+def _reject_symlink_path(path: Path) -> None:
+    """Reject static symlinks in a storage path and all its ancestors."""
+    for component in (path.absolute(), *path.absolute().parents):
+        if component.is_symlink():
+            raise ValueError(f"symlinked storage path: {component}")
+
+
 def _validate_batch_state(workdir: Path, identity: ExecutionIdentity) -> None:
     """Fail closed when immutable run provenance differs."""
+    _reject_symlink_path(workdir / "run-state.json")
     try:
         if _compact_json(
             json.loads((workdir / "run-state.json").read_text())
@@ -726,6 +735,9 @@ def _initialize_batch_workdir(
         resume: Validate existing state without rewriting it.
         final_dir: Optional final destination which must remain absent.
     """
+    _reject_symlink_path(workdir)
+    if final_dir is not None:
+        _reject_symlink_path(final_dir)
     if final_dir is not None and final_dir.exists():
         raise FileExistsError(final_dir)
     if identity.batch_schema_version != 1:
@@ -755,6 +767,7 @@ def _write_origin_batch(
     _validate_batch_state(workdir, identity)
     metadata = batch_metadata(batch, identity)
     out = _batch_path(workdir, batch.model, batch.origin)
+    _reject_symlink_path(out)
     if out.exists():
         raise FileExistsError(out)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -804,6 +817,7 @@ def _read_origin_batch(
         _validate_batch_state(workdir, identity)
         if path != _batch_path(workdir, model, origin) or path.is_symlink():
             raise ValueError("batch path differs from expected model/origin")
+        _reject_symlink_path(path / "batch.json")
         metadata = json.loads((path / "batch.json").read_text())
         if not isinstance(metadata, dict):
             raise ValueError("manifest must be an object")  # noqa: TRY004 - corrupt persisted data
@@ -874,6 +888,7 @@ def _read_origin_batch(
 
 def _write_progress(workdir: Path, snapshot: ProgressSnapshot) -> None:
     """Atomically replace advisory progress without changing immutable state."""
+    _reject_symlink_path(workdir / "progress.json")
     temporary = workdir / f".progress.{uuid.uuid4().hex}.tmp"
     temporary.write_text(_compact_json(contract_json(snapshot)))
     os.replace(temporary, workdir / "progress.json")
@@ -881,6 +896,7 @@ def _write_progress(workdir: Path, snapshot: ProgressSnapshot) -> None:
 
 def _append_runtime_event(workdir: Path, event: Mapping[str, object]) -> None:
     """Append one compact JSON object and newline per event."""
+    _reject_symlink_path(workdir / "runtime.jsonl")
     line = _compact_json(dict(event)) + "\n"
     with (workdir / "runtime.jsonl").open("a") as stream:
         stream.write(line)
@@ -889,6 +905,7 @@ def _append_runtime_event(workdir: Path, event: Mapping[str, object]) -> None:
 def _read_runtime_events(workdir: Path) -> tuple[dict, ...]:
     """Read event objects, tolerating only an incomplete final JSON line."""
     path = workdir / "runtime.jsonl"
+    _reject_symlink_path(path)
     if not path.exists():
         return ()
     lines = path.read_bytes().splitlines(keepends=True)
@@ -898,31 +915,21 @@ def _read_runtime_events(workdir: Path) -> tuple[dict, ...]:
         try:
             text = line.decode("utf-8")
         except UnicodeDecodeError as exc:
-            if not final_fragment or exc.reason != "unexpected end of data":
-                raise ValueError("invalid runtime event encoding") from exc
-            text = line[: exc.start].decode("utf-8")
-        try:
-
-            def reject_constant(value: str) -> None:
-                raise ValueError(f"invalid JSON constant: {value}")
-
-            event = json.loads(text, parse_constant=reject_constant)
-        except json.JSONDecodeError as exc:
-            tail = text[exc.pos :]
-            incomplete = (
-                exc.pos == len(text)
-                or exc.msg.startswith("Unterminated string")
-                or (
-                    exc.msg == "Expecting value"
-                    and tail
-                    in ("t", "tr", "tru", "f", "fa", "fal", "fals", "n", "nu", "nul")
+            if (
+                not final_fragment
+                or exc.reason != "unexpected end of data"
+                or not incomplete_object_prefix(
+                    line[: exc.start].decode("utf-8"), partial_utf8=True
                 )
-            )
-            if final_fragment and incomplete:
+            ):
+                raise ValueError("invalid runtime event encoding") from exc
+            break
+        try:
+            event = decode_runtime_object(text)
+        except json.JSONDecodeError as exc:
+            if final_fragment and incomplete_object_prefix(text):
                 break
             raise ValueError("invalid runtime event line") from exc
-        if not isinstance(event, dict):
-            raise ValueError("runtime event must be an object")  # noqa: TRY004 - corrupt persisted data
         events.append(event)
     return tuple(events)
 
