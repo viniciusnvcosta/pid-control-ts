@@ -22,6 +22,7 @@ import json
 import logging
 import os
 import platform
+import re
 import shutil
 import subprocess
 import time
@@ -466,13 +467,24 @@ def _write_benchmark_v2_artifacts(
     input_sha256: str,
     repo: Path,
     initial_sha: str,
+    *,
+    resume_summary: "ResumeSummary | None" = None,
 ) -> Path:
     """Write the v2 evidence bundle into owned staging and publish atomically."""
     out = cfg.output_dir / cfg.run_id
     if out.exists():
         raise FileExistsError(f"{out} exists; choose a new run_id")
-    staging = out.with_name(f".{out.name}.{uuid.uuid4().hex}.partial")
-    staging.mkdir(parents=True, exist_ok=False)
+    staging = (
+        resume_summary.workdir
+        if resume_summary is not None
+        else out.with_name(f".{out.name}.{uuid.uuid4().hex}.partial")
+    )
+    if resume_summary is None:
+        staging.mkdir(parents=True, exist_ok=False)
+    else:
+        _verify_final_batches(resume_summary)
+        for path in staging.rglob("*"):
+            _reject_symlink_path(path)
     try:
         tables = {
             "base_forecasts": result.base_forecasts,
@@ -490,7 +502,7 @@ def _write_benchmark_v2_artifacts(
             frame.to_parquet(staging / f"{name}.parquet", index=False)
 
         figures_dir = staging / "figures"
-        figures_dir.mkdir()
+        figures_dir.mkdir(exist_ok=True)
         figures = benchmark_figures(result, block=cfg.blocks[0], lr=cfg.lr)
         try:
             for name, figure in figures.items():
@@ -613,9 +625,30 @@ def _write_benchmark_v2_artifacts(
         manifest["analysis_note"] = (
             "Exploratory benchmark; v1 outcomes informed v2; no unadjusted primary."
         )
+        if resume_summary is not None:
+            identity = resume_summary.identity
+            manifest["execution"] = contract_json(identity)["runtime_provenance"]
+            manifest["execution_identity"] = contract_json(identity)
+            manifest["provenance"] = {
+                "config_sha256": identity.config_sha256,
+                "lockfile_sha256": identity.lockfile_sha256,
+            }
+            manifest["resume"] = {
+                "completed_batches": resume_summary.total_batches,
+                "resumed_batches": resume_summary.resumed_batches,
+                "generated_batches": resume_summary.generated_batches,
+                "total_batches": resume_summary.total_batches,
+            }
+            manifest["artifacts"] = {
+                str(path.relative_to(staging)): file_sha256(path)
+                for path in sorted(staging.rglob("*"))
+                if path.is_file() and path != staging / "manifest.json"
+            }
         (staging / "manifest.json").write_text(
             json.dumps(manifest, indent=2, default=str)
         )
+        if resume_summary is not None:
+            _verify_final_batches(resume_summary)
         current_sha = require_clean_git(repo)
         if current_sha != initial_sha or current_sha != final_sha:
             raise RuntimeError(
@@ -624,7 +657,8 @@ def _write_benchmark_v2_artifacts(
         _rename_noreplace(staging, out)
         return out
     except BaseException:
-        shutil.rmtree(staging, ignore_errors=True)
+        if resume_summary is None:
+            shutil.rmtree(staging, ignore_errors=True)
         raise
 
 
@@ -637,15 +671,90 @@ class ResumeSummary:
     resumed_batches: int
     generated_batches: int
     total_batches: int
+    batches: tuple[OriginForecastBatch, ...]
+    batch_hashes: Mapping[str, str]
+
+
+def _verify_final_batches(summary: ResumeSummary) -> None:
+    """Revalidate every expected batch and its pre-evaluation byte identity."""
+    _validate_batch_state(summary.workdir, summary.identity)
+    if (
+        len(summary.batches) != summary.total_batches
+        or summary.resumed_batches + summary.generated_batches != summary.total_batches
+    ):
+        raise ValueError("incomplete batch summary")
+    expected = set()
+    for batch in summary.batches:
+        path = _batch_path(summary.workdir, batch.model, batch.origin)
+        expected.add(path)
+        _read_origin_batch(
+            path,
+            summary.identity,
+            **{
+                name: getattr(batch, name)
+                for name in (
+                    "model",
+                    "target_index",
+                    "target",
+                    "origin",
+                    "nodes",
+                    "seed_spawn_key",
+                    "source_kind",
+                )
+            },
+        )
+    if set(summary.workdir.glob("batches/*/*.batch")) != expected:
+        raise ValueError("unexpected or missing completed batch")
+    for name, digest in summary.batch_hashes.items():
+        if file_sha256(summary.workdir / name) != digest:
+            raise ValueError("batch evidence changed after generation")
+
+
+def _finalize_benchmark_v2_artifacts(
+    cfg: RunConfig,
+    result: BenchmarkResult,
+    generated: ForecastResult,
+    summary: ResumeSummary,
+    input_sha256: str,
+    repo: Path,
+) -> Path:
+    """Publish the verified fixed work directory while retaining failed evidence.
+
+    Args:
+        cfg: Registered run configuration.
+        result: Completed evaluation and diagnostic tables.
+        generated: Assembled forecast output with scientific diagnostics.
+        summary: Verified batch identity and invocation counts.
+        input_sha256: Canonical input file digest.
+        repo: Repository checked before atomic publication.
+
+    Returns:
+        Published final result directory.
+    """
+    if summary.workdir != cfg.output_dir / f".{cfg.run_id}.partial":
+        raise ValueError("unexpected finalization work directory")
+    return _write_benchmark_v2_artifacts(
+        cfg,
+        result,
+        dict(generated.diagnostics),
+        input_sha256,
+        repo,
+        summary.identity.git_sha,
+        resume_summary=summary,
+    )
 
 
 def _runtime_event(workdir: Path, event: str, **values: object) -> None:
-    """Persist and print the same concise run event."""
+    """Persist full structured evidence and print a bounded single-line event."""
     _append_runtime_event(workdir, {"event": event, **values})
     fields = " ".join(
         f"{key}={value}" for key, value in values.items() if value is not None
     )
-    print(f"{event} {fields}".rstrip(), flush=True)
+    console = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", f"{event} {fields}")
+    console = " ".join(
+        "".join(char if char.isprintable() else " " for char in console).split()
+    )
+    print(console[:296] + ("..." if len(console) > 296 else ""), flush=True)
 
 
 @contextmanager
@@ -755,7 +864,19 @@ def _generate_or_resume_v2(
                 eta_seconds=round(eta, 3),
             )
         result = assemble_model_bundles(plan, tuple(batches), cfg)
-        return result, ResumeSummary(workdir, identity, resumed, generated, total)
+        return result, ResumeSummary(
+            workdir,
+            identity,
+            resumed,
+            generated,
+            total,
+            tuple(batches),
+            {
+                str(path.relative_to(workdir)): file_sha256(path)
+                for path in workdir.glob("batches/*/*.batch/*")
+                if path.is_file()
+            },
+        )
     except BaseException as exc:
         _runtime_event(
             workdir,
@@ -912,8 +1033,14 @@ def main(argv: list[str] | None = None) -> int:
         if initial_git_sha is None:
             out = write_benchmark_artifacts(cfg, result, forecast_diagnostics, digest)
         else:
-            out = _write_benchmark_v2_artifacts(
-                cfg, result, forecast_diagnostics, digest, repo, initial_git_sha
+            generated = ForecastResult(
+                generated.bundles,
+                generated.base_forecasts,
+                forecast_diagnostics,
+                generated.tables,
+            )
+            out = _finalize_benchmark_v2_artifacts(
+                cfg, result, generated, _resume_summary, digest, repo
             )
     elif cfg.design == "panel":
         frame = read_forecasts(cfg.data_path, cfg.expected_sha256)

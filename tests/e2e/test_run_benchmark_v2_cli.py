@@ -12,7 +12,7 @@ from matplotlib import pyplot as plt
 import hcp.run as run_module
 from hcp.benchmark import BenchmarkResult
 from hcp.config import RunConfig
-from hcp.forecast_types import DiagnosticsTables
+from hcp.forecast_types import DiagnosticsTables, ForecastResult
 
 MODELS = (
     "arima",
@@ -55,10 +55,15 @@ def test_v2_cli_writes_all_models_cells_tables_and_manifest(
         return git_checks[-1]
 
     monkeypatch.setattr(run_module, "require_clean_git", checked_git)
+    real_hash = run_module.file_sha256
     monkeypatch.setattr(
         run_module,
         "file_sha256",
-        lambda path: file_hashes[Path(path).name],
+        lambda path: (
+            file_hashes[Path(path).name]
+            if Path(path).name in file_hashes
+            else real_hash(path)
+        ),
     )
     monkeypatch.setattr(run_module, "read_forecasts", lambda path: pd.DataFrame())
     monkeypatch.setattr(
@@ -87,12 +92,64 @@ def test_v2_cli_writes_all_models_cells_tables_and_manifest(
     )
     # This case isolates the existing final-writer boundary; resume is covered below.
     monkeypatch.setattr(run_module, "plan_model_forecasts", lambda *args: object())
-    monkeypatch.setattr(run_module, "_v2_execution_identity", lambda *args: object())
+    from hcp.benchmark_batch import (
+        ExecutionIdentity,
+        OriginForecastBatch,
+        ProgressSnapshot,
+    )
+
+    identity = ExecutionIdentity(
+        "benchmark-v2",
+        cfg.run_id,
+        "a" * 40,
+        "c" * 64,
+        "d" * 64,
+        "datahash",
+        cfg.root_seed,
+        ("arima",),
+        ("arima/2024-12-09",),
+        (0.1, 0.5, 0.9),
+        1,
+        "3.11",
+        {},
+        {"device": "cuda:0", "gpu_uuid": "GPU-test", "cuda_version": "12.8"},
+    )
+    monkeypatch.setattr(run_module, "_v2_execution_identity", lambda *args: identity)
 
     def generated_v2(*args, **kwargs):
         workdir = args[3]
-        workdir.mkdir(parents=True)
-        return run_module.generate_model_bundles(), object()
+        run_module._initialize_batch_workdir(workdir, identity)
+        batch = OriginForecastBatch(
+            "arima",
+            0,
+            np.datetime64("2025-01-04"),
+            np.datetime64("2024-12-09"),
+            (0, 0, 0),
+            ("US",),
+            np.array([[1.0, 2.0, 3.0]]),
+            "sample_derived",
+            DiagnosticsTables(),
+            {},
+            (),
+            0.5,
+        )
+        path = run_module._write_origin_batch(workdir, identity, batch)
+        run_module._write_progress(
+            workdir,
+            ProgressSnapshot("arima", "2024-12-09", 1, 1, {"arima": 1}, 0.5, 0.0),
+        )
+        generated = run_module.generate_model_bundles()
+        return ForecastResult(
+            generated.bundles, pd.DataFrame(), generated.diagnostics
+        ), run_module.ResumeSummary(
+            workdir,
+            identity,
+            0,
+            1,
+            1,
+            (batch,),
+            {str(p.relative_to(workdir)): real_hash(p) for p in path.iterdir()},
+        )
 
     monkeypatch.setattr(run_module, "_generate_or_resume_v2", generated_v2)
     cells = [
@@ -197,6 +254,8 @@ def test_v2_cli_writes_all_models_cells_tables_and_manifest(
     original_publish = run_module._rename_noreplace
 
     def observe_publish(staging, destination):
+        if destination.name.endswith(".batch"):
+            return original_publish(staging, destination)
         assert events == ["manifest"]
         assert (staging / "manifest.json").is_file()
         assert len(list(staging.glob("*.parquet"))) == 10
@@ -247,11 +306,12 @@ def test_v2_cli_writes_all_models_cells_tables_and_manifest(
     assert manifest["families"]["hierarchy"]["size"] == 96
     assert manifest["families"]["model"]["size"] == 56
     assert manifest["execution"] == {
-        "device": "cpu",
-        "devices": 1,
-        "data_loader_workers": 0,
-        "deterministic_algorithms": True,
+        "device": "cuda:0",
+        "gpu_uuid": "GPU-test",
+        "cuda_version": "12.8",
     }
+    assert "runtime.jsonl" in manifest["artifacts"]
+    assert not (cfg.output_dir / f".{cfg.run_id}.partial").exists()
     assert manifest["provenance"] == {
         "config_sha256": "c" * 64,
         "lockfile_sha256": "d" * 64,
@@ -389,13 +449,13 @@ def test_cli_resumes_after_two_batches_before_evaluating(tmp_path, monkeypatch, 
 
     def evaluate(bundles, cfg, *, actuals):
         evaluated.append(bundles["deepar"].q.copy())
-        return object()
+        frame = pd.DataFrame({"value": [1.0]})
+        return BenchmarkResult(
+            frame, frame, frame, frame, frame, frame, {}, DiagnosticsTables()
+        )
 
     monkeypatch.setattr(run_module, "run_benchmark", evaluate)
-    # Task 8 owns final publication; this test ends at that interface.
-    monkeypatch.setattr(
-        run_module, "_write_benchmark_v2_artifacts", lambda *args: tmp_path / "final"
-    )
+    monkeypatch.setattr(run_module, "benchmark_figures", lambda *args, **kwargs: {})
     with pytest.raises(RuntimeError, match="interrupted"):
         run_module.main(["configs/model_benchmarks_v2.toml"])
     assert not evaluated
@@ -407,7 +467,17 @@ def test_cli_resumes_after_two_batches_before_evaluating(tmp_path, monkeypatch, 
     assert run_module.main(["configs/model_benchmarks_v2.toml"]) == 0
     assert calls == [(0, 0, 2), (0, 0, 3)]
     assert len(evaluated) == 1
-    events = run_module._read_runtime_events(workdir)
+    out = cfg.output_dir / cfg.run_id
+    assert out.exists() and not workdir.exists()
+    manifest = json.loads((out / "manifest.json").read_text())
+    assert manifest["resume"] == {
+        "completed_batches": 4,
+        "resumed_batches": 2,
+        "generated_batches": 2,
+        "total_batches": 4,
+    }
+    assert manifest["execution"]["gpu_uuid"] == "GPU-test"
+    events = run_module._read_runtime_events(out)
     assert [event["event"] for event in events].count("evaluation_start") == 1
     assert [event["event"] for event in events].count("resume_skip") == 2
     assert len(capsys.readouterr().out.splitlines()) == 11
