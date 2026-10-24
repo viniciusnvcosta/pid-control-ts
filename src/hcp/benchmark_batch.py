@@ -264,6 +264,8 @@ def device_identity(
         raise ValueError("device identity requires registered CUDA execution")
     properties = torch_module.cuda.get_device_properties(0)
     gpu_uuid = str(properties.uuid)
+    if not gpu_uuid.startswith("GPU-"):
+        gpu_uuid = f"GPU-{gpu_uuid}"
     driver = nvidia_identity.get(gpu_uuid, "")
     if not driver:
         raise ValueError("NVIDIA driver identity missing for selected GPU UUID")

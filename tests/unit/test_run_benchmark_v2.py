@@ -260,6 +260,29 @@ def test_cuda_gate_captures_exact_runtime(monkeypatch):
     assert fake.backends.cuda.matmul.allow_tf32 is False
 
 
+def test_cuda_gate_normalizes_torch_uuid_and_preserves_nvidia_identity(monkeypatch):
+    from types import SimpleNamespace
+
+    fake = _cuda_torch(monkeypatch)
+    fake.cuda.get_device_properties = lambda index: SimpleNamespace(
+        name="NVIDIA GeForce RTX 4080",
+        uuid="f3dad84a-4909-bd89-f509-0c2f79debd6f",
+    )
+    monkeypatch.setattr(
+        run_module,
+        "_query_nvidia_identity",
+        lambda index: {
+            "GPU-other": "wrong-driver",
+            "GPU-f3dad84a-4909-bd89-f509-0c2f79debd6f": "580.95.05",
+        },
+    )
+
+    provenance = run_module._configure_v2_cuda(_execution())
+
+    assert provenance.gpu_uuid == "GPU-f3dad84a-4909-bd89-f509-0c2f79debd6f"
+    assert provenance.driver_version == "580.95.05"
+
+
 @pytest.mark.parametrize(
     "kwargs,match",
     [
@@ -294,6 +317,30 @@ def test_nvidia_query_matches_visible_uuid_not_physical_index(monkeypatch):
     result = probe(0)
     assert result == {"GPU-other": "570.1", "GPU-test": "570.1"}
     assert "--query-gpu=uuid,driver_version" in calls[0]
+
+
+@pytest.mark.parametrize(
+    "output",
+    ["", "GPU-test, 570.1\nGPU-test, 570.2\n", "GPU-test, \n"],
+)
+def test_nvidia_query_rejects_missing_or_ambiguous_identity(monkeypatch, output):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        run_module.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=output),
+    )
+    with pytest.raises(RuntimeError, match="identity query failed"):
+        run_module._query_nvidia_identity(0)
+
+
+@pytest.mark.parametrize("identities", [{}, {"GPU-other": "570.1"}])
+def test_cuda_gate_rejects_missing_or_nonmatching_uuid(monkeypatch, identities):
+    _cuda_torch(monkeypatch)
+    monkeypatch.setattr(run_module, "_query_nvidia_identity", lambda index: identities)
+    with pytest.raises(RuntimeError, match="driver identity missing"):
+        run_module._configure_v2_cuda(_execution())
 
 
 def test_cuda_gate_rejects_matching_unregistered_gpu(monkeypatch):
