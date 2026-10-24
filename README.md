@@ -155,11 +155,34 @@ The cumulative v2 exploratory benchmark is separately registered by D32 and adds
 Transformer, local L1 quantile regression, and an enhanced DeepAR-style model. It uses four
 principal arms and two declared Holm families; prior v1 outcomes informed its design, so v2
 remains exploratory. Protocol, review, verification, and limitations are recorded in
-`docs/analysis/model-benchmarks-v2-protocol-readiness.md`. Its command is:
+`docs/analysis/model-benchmarks-v2-protocol-readiness.md`. The prospective CUDA amendment
+registers neural execution on the RTX 4080 (`cuda:0`, deterministic FP32, TF32 disabled).
+Two pre-amendment attempts remain unpublished. CUDA repeatability checks passed twice;
+full verification still has documented warning-fixture and formatting failures.
+After final review, fresh full verification, and explicit launch authorization, use
+an interactive CUDA terminal from this worktree:
 
 ```bash
-uv run python -m hcp.run configs/model_benchmarks_v2.toml
+UV_CACHE_DIR=/tmp/model-benchmarks-v2-cuda UV_NO_SYNC=1 uv run python -m hcp.run configs/model_benchmarks_v2.toml
 ```
 
 Run publication is immutable at `results/model-benchmarks-v2/`; an existing result is never
 overwritten.
+
+The fixed work directory is `results/.model-benchmarks-v2.partial/`. Immutable
+`run-state.json` binds code, inputs, config, packages, seed plan, and GPU/runtime identity;
+`batches/<model>/<origin>.batch/` holds immutable hash-validated origin forecasts and
+diagnostics. From a second terminal in the same worktree, monitor:
+
+```bash
+watch -n 5 cat results/.model-benchmarks-v2.partial/progress.json
+tail -f results/.model-benchmarks-v2.partial/runtime.jsonl
+```
+
+Resume by repeating the exact launch command from the same clean Git SHA and matching
+environment; there is no resume flag. Valid completed batches are skipped; identity or
+batch corruption stops execution. Preserve incompatible work directories outside the
+registered path. Keep `HEAD` fixed until publication and across resume: **do not commit,
+merge, rebase, pull, or checkout during execution**. The readiness record contains
+amendment/implementation SHAs, GPU identity, verification evidence, and the complete
+fresh-launch and batch contract. No official completed result is claimed.
