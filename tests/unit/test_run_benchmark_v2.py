@@ -174,7 +174,14 @@ def test_v2_writer_rejects_sha_change_and_cleans_owned_staging(
     assert not list(cfg.output_dir.glob(".*.partial"))
 
 
-def _cuda_torch(monkeypatch, *, available=True, count=1, name="NVIDIA GeForce RTX 4080", deterministic=True):
+def _cuda_torch(
+    monkeypatch,
+    *,
+    available=True,
+    count=1,
+    name="NVIDIA GeForce RTX 4080",
+    deterministic=True,
+):
     import os
     import sys
     from types import SimpleNamespace
@@ -184,6 +191,7 @@ def _cuda_torch(monkeypatch, *, available=True, count=1, name="NVIDIA GeForce RT
         return value
 
     state = SimpleNamespace(enabled=False)
+
     def enable(enabled, *, warn_only):
         assert warn_only is False
         if not deterministic:
@@ -198,7 +206,9 @@ def _cuda_torch(monkeypatch, *, available=True, count=1, name="NVIDIA GeForce RT
             is_available=lambda: operation(available),
             device_count=lambda: operation(count),
             set_device=lambda index: operation(index),
-            get_device_properties=lambda index: SimpleNamespace(name=name, uuid="GPU-test"),
+            get_device_properties=lambda index: SimpleNamespace(
+                name=name, uuid="GPU-test"
+            ),
             get_device_capability=lambda index: (8, 9),
         ),
         backends=SimpleNamespace(
@@ -212,14 +222,21 @@ def _cuda_torch(monkeypatch, *, available=True, count=1, name="NVIDIA GeForce RT
         is_deterministic_algorithms_warn_only_enabled=lambda: False,
     )
     monkeypatch.setitem(sys.modules, "torch", fake)
-    monkeypatch.setattr(run_module, "_query_nvidia_identity",
-                        lambda index: {"GPU-test": "570.1"}, raising=False)
+    monkeypatch.setattr(
+        run_module,
+        "_query_nvidia_identity",
+        lambda index: {"GPU-test": "570.1"},
+        raising=False,
+    )
     return fake
 
 
 def _execution():
     from hcp.benchmark_batch import NeuralExecution
-    return NeuralExecution("cuda:0", "NVIDIA GeForce RTX 4080", ":4096:8", False, "32-true")
+
+    return NeuralExecution(
+        "cuda:0", "NVIDIA GeForce RTX 4080", ":4096:8", False, "32-true"
+    )
 
 
 def test_cuda_gate_captures_exact_runtime(monkeypatch):
@@ -243,12 +260,15 @@ def test_cuda_gate_captures_exact_runtime(monkeypatch):
     assert fake.backends.cuda.matmul.allow_tf32 is False
 
 
-@pytest.mark.parametrize("kwargs,match", [
-    ({"available": False}, "CUDA"),
-    ({"count": 2}, "one visible"),
-    ({"name": "other GPU"}, "GPU"),
-    ({"deterministic": False}, "deterministic"),
-])
+@pytest.mark.parametrize(
+    "kwargs,match",
+    [
+        ({"available": False}, "CUDA"),
+        ({"count": 2}, "one visible"),
+        ({"name": "other GPU"}, "GPU"),
+        ({"deterministic": False}, "deterministic"),
+    ],
+)
 def test_cuda_gate_fails_closed(monkeypatch, kwargs, match):
     _cuda_torch(monkeypatch, **kwargs)
     gate = getattr(run_module, "_configure_v2_cuda", None)
@@ -259,17 +279,21 @@ def test_cuda_gate_fails_closed(monkeypatch, kwargs, match):
 
 def test_nvidia_query_matches_visible_uuid_not_physical_index(monkeypatch):
     from types import SimpleNamespace
+
     calls = []
+
     def query(args, **kwargs):
         calls.append(args)
-        return SimpleNamespace(returncode=0, stdout="GPU-other, 570.1\nGPU-test, 570.1\n")
+        return SimpleNamespace(
+            returncode=0, stdout="GPU-other, 570.1\nGPU-test, 570.1\n"
+        )
+
     monkeypatch.setattr(run_module.subprocess, "run", query)
     probe = getattr(run_module, "_query_nvidia_identity", None)
     assert probe is not None, "NVIDIA identity probe is absent"
     result = probe(0)
     assert result == {"GPU-other": "570.1", "GPU-test": "570.1"}
     assert "--query-gpu=uuid,driver_version" in calls[0]
-
 
 
 def test_cuda_gate_rejects_matching_unregistered_gpu(monkeypatch):
@@ -292,3 +316,388 @@ def test_cuda_gate_rejects_initialized_runtime_without_mutation(monkeypatch):
     assert os.environ["CUBLAS_WORKSPACE_CONFIG"] == "existing-setting"
     assert fake.backends.cuda.matmul.allow_tf32 is True
     assert fake.backends.cudnn.allow_tf32 is True
+
+
+def _storage_fixture():
+    import numpy as np
+
+    from hcp.benchmark_batch import ExecutionIdentity, OriginForecastBatch
+
+    identity = ExecutionIdentity(
+        "benchmark-v2",
+        "fixture",
+        "abc",
+        "a" * 64,
+        "b" * 64,
+        "c" * 64,
+        42,
+        ("arima", "deepar"),
+        ("2020-01-05",),
+        (0.1, 0.5, 0.9),
+        1,
+        "3.11",
+        {"numpy": "fixture"},
+        {"device": "cpu"},
+    )
+    batch = OriginForecastBatch(
+        "arima",
+        3,
+        np.datetime64("2020-02-02"),
+        np.datetime64("2020-01-05"),
+        (0, 0, 3),
+        ("US",),
+        np.array([[1.0, 2.0, 3.0]]),
+        "sample_derived",
+        DiagnosticsTables(),
+        {"warning": 2},
+        ({"node": "US", "count": 1},),
+        0.5,
+    )
+    return identity, batch
+
+
+def _read_batch(path, identity, batch, **changes):
+    expected = {
+        name: getattr(batch, name)
+        for name in (
+            "model",
+            "target_index",
+            "target",
+            "origin",
+            "nodes",
+            "seed_spawn_key",
+            "source_kind",
+        )
+    }
+    expected.update(changes)
+    return run_module._read_origin_batch(path, identity, **expected)
+
+
+def test_batch_storage_round_trip_and_immutable_state(tmp_path):
+    from dataclasses import replace
+
+    import numpy as np
+
+    identity, batch = _storage_fixture()
+    work = tmp_path / ".fixture.partial"
+    run_module._initialize_batch_workdir(work, identity)
+    state = (work / "run-state.json").read_bytes()
+    with pytest.raises(FileExistsError):
+        run_module._initialize_batch_workdir(work, identity)
+    run_module._initialize_batch_workdir(work, identity, resume=True)
+    with pytest.raises(ValueError):
+        run_module._initialize_batch_workdir(
+            work, replace(identity, root_seed=43), resume=True
+        )
+    assert (work / "run-state.json").read_bytes() == state
+    path = run_module._write_origin_batch(work, identity, batch)
+    restored = _read_batch(path, identity, batch)
+    np.testing.assert_array_equal(restored.quantiles, batch.quantiles)
+    assert restored.warning_counts == batch.warning_counts
+    assert restored.interpolation == batch.interpolation
+    assert restored.elapsed_seconds == 0.5
+    for name in ("forecast_diagnostics", "tuning", "quantile_repairs", "warnings"):
+        pd.testing.assert_frame_equal(
+            getattr(restored.diagnostics, name), getattr(batch.diagnostics, name)
+        )
+    with pytest.raises(ValueError):
+        restored.quantiles[0, 0] = 0
+    with pytest.raises(TypeError):
+        restored.warning_counts["new"] = 1
+    with pytest.raises(FileExistsError):
+        run_module._write_origin_batch(work, identity, batch)
+    np.testing.assert_array_equal(
+        _read_batch(path, identity, batch).quantiles, batch.quantiles
+    )
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("model", "deepar"),
+        ("target_index", 4),
+        ("origin", "2020-01-12"),
+        ("target", "2020-02-09"),
+        ("seed_spawn_key", (0, 1, 3)),
+        ("nodes", ("OTHER",)),
+        ("source_kind", "native_quantiles"),
+    ],
+)
+def test_batch_reader_rejects_swapped_expected_identity(tmp_path, field, value):
+    identity, batch = _storage_fixture()
+    run_module._initialize_batch_workdir(tmp_path / "work", identity)
+    path = run_module._write_origin_batch(tmp_path / "work", identity, batch)
+    with pytest.raises(ValueError):
+        _read_batch(path, identity, batch, **{field: value})
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        "hash",
+        "rows",
+        "model",
+        "origin",
+        "seed_spawn_key",
+        "schema_version",
+        "execution_digest",
+        "missing_manifest",
+        "json",
+        "extra",
+        "parquet",
+    ],
+)
+def test_batch_reader_fails_closed_on_corruption(tmp_path, corruption):
+    import hashlib
+    import json
+
+    identity, batch = _storage_fixture()
+    work = tmp_path / "work"
+    run_module._initialize_batch_workdir(work, identity)
+    path = run_module._write_origin_batch(work, identity, batch)
+    manifest = path / "batch.json"
+    payload = json.loads(manifest.read_text())
+    if corruption == "missing_manifest":
+        manifest.unlink()
+    elif corruption == "json":
+        manifest.write_text("{")
+    elif corruption == "extra":
+        (path / "unexpected").write_text("extra")
+    elif corruption in ("hash", "parquet"):
+        forecast = path / "forecasts.parquet"
+        forecast.write_bytes(b"invalid parquet")
+        if corruption == "parquet":
+            payload["payloads"]["forecasts.parquet"]["sha256"] = hashlib.sha256(
+                forecast.read_bytes()
+            ).hexdigest()
+            manifest.write_text(json.dumps(payload))
+    else:
+        if corruption == "rows":
+            payload["payloads"]["forecasts.parquet"]["rows"] += 1
+        else:
+            payload[corruption] = {
+                "model": "deepar",
+                "origin": "2020-01-12",
+                "seed_spawn_key": [0, 1, 3],
+                "schema_version": 999,
+                "execution_digest": "wrong",
+            }[corruption]
+        manifest.write_text(json.dumps(payload))
+    with pytest.raises(ValueError):
+        _read_batch(path, identity, batch)
+
+
+def test_batch_payload_hash_and_row_count_cover_every_table(tmp_path):
+    import json
+
+    identity, batch = _storage_fixture()
+    work = tmp_path / "work"
+    run_module._initialize_batch_workdir(work, identity)
+    path = run_module._write_origin_batch(work, identity, batch)
+    manifest = json.loads((path / "batch.json").read_text())
+    for name in manifest["payloads"]:
+        saved = (path / name).read_bytes()
+        (path / name).write_bytes(saved + b"corrupt")
+        with pytest.raises(ValueError):
+            _read_batch(path, identity, batch)
+        (path / name).write_bytes(saved)
+        manifest["payloads"][name]["rows"] += 1
+        (path / "batch.json").write_text(json.dumps(manifest))
+        with pytest.raises(ValueError):
+            _read_batch(path, identity, batch)
+        manifest["payloads"][name]["rows"] -= 1
+        (path / "batch.json").write_text(json.dumps(manifest))
+
+
+def test_batch_crash_before_manifest_and_temporary_sibling_are_not_reusable(
+    tmp_path, monkeypatch
+):
+    identity, batch = _storage_fixture()
+    work = tmp_path / "work"
+    run_module._initialize_batch_workdir(work, identity)
+    original = Path.write_text
+
+    def crash(path, *args, **kwargs):
+        if path.name == "batch.json":
+            assert len(list(path.parent.glob("*.parquet"))) == 5
+            raise OSError("simulated crash")
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", crash)
+    with pytest.raises(OSError, match="simulated crash"):
+        run_module._write_origin_batch(work, identity, batch)
+    assert not list(work.glob("batches/*/*.batch"))
+    temporary = next(work.glob("batches/*/.*"))
+    with pytest.raises(ValueError):
+        _read_batch(temporary, identity, batch)
+    monkeypatch.setattr(Path, "write_text", original)
+    complete = run_module._write_origin_batch(work, identity, batch)
+    assert _read_batch(complete, identity, batch).model == "arima"
+
+
+def test_progress_atomic_replacement_and_runtime_truncated_final_line(
+    tmp_path, monkeypatch
+):
+    import json
+
+    from hcp.benchmark_batch import ProgressSnapshot
+
+    snapshot = ProgressSnapshot("arima", "2020-01-05", 1, 2, {"arima": 1}, 3.0, 3.0)
+    run_module._write_progress(tmp_path, snapshot)
+    old = (tmp_path / "progress.json").read_bytes()
+    original = run_module.os.replace
+    monkeypatch.setattr(
+        run_module.os, "replace", lambda *args: (_ for _ in ()).throw(OSError("crash"))
+    )
+    with pytest.raises(OSError):
+        run_module._write_progress(tmp_path, snapshot)
+    assert (tmp_path / "progress.json").read_bytes() == old
+    monkeypatch.setattr(run_module.os, "replace", original)
+    run_module._write_progress(tmp_path, snapshot)
+    assert json.loads((tmp_path / "progress.json").read_text())["completed"] == 1
+    run_module._append_runtime_event(tmp_path, {"event": "completed", "count": 1})
+    with (tmp_path / "runtime.jsonl").open("ab") as stream:
+        stream.write(b'{"event": "crash\xe2')
+    assert run_module._read_runtime_events(tmp_path) == (
+        {"event": "completed", "count": 1},
+    )
+    (tmp_path / "runtime.jsonl").write_bytes(b"{broken}\n")
+    with pytest.raises(ValueError):
+        run_module._read_runtime_events(tmp_path)
+    (tmp_path / "runtime.jsonl").write_bytes(b"{broken}\n{}")
+    with pytest.raises(ValueError):
+        run_module._read_runtime_events(tmp_path)
+    (tmp_path / "runtime.jsonl").write_bytes(b"[]\n")
+    with pytest.raises(ValueError):
+        run_module._read_runtime_events(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "line", [b"{broken}", b'{"event":invalid}', b'{"event":NaN}', b'{"event":"\xff"}']
+)
+def test_runtime_reader_rejects_malformed_unterminated_final_line(tmp_path, line):
+    (tmp_path / "runtime.jsonl").write_bytes(line)
+    with pytest.raises(ValueError):
+        run_module._read_runtime_events(tmp_path)
+
+
+def test_batch_read_checks_execution_schema_and_complete_temporary_name(tmp_path):
+    from dataclasses import replace
+
+    identity, batch = _storage_fixture()
+    work = tmp_path / "work"
+    run_module._initialize_batch_workdir(work, identity)
+    path = run_module._write_origin_batch(work, identity, batch)
+    for other in (
+        replace(identity, root_seed=1),
+        replace(identity, batch_schema_version=2),
+    ):
+        with pytest.raises(ValueError):
+            _read_batch(path, other, batch)
+    temporary = path.with_name(".completed.tmp")
+    path.rename(temporary)
+    with pytest.raises(ValueError):
+        _read_batch(temporary, identity, batch)
+
+
+def test_batch_writer_no_replace_race_preserves_destination(tmp_path, monkeypatch):
+    identity, batch = _storage_fixture()
+    work = tmp_path / "work"
+    run_module._initialize_batch_workdir(work, identity)
+    original = run_module._rename_noreplace
+
+    def race(source, destination):
+        assert (source / "batch.json").exists()
+        destination.mkdir()
+        (destination / "sentinel").write_text("original")
+        original(source, destination)
+
+    monkeypatch.setattr(run_module, "_rename_noreplace", race)
+    with pytest.raises(FileExistsError):
+        run_module._write_origin_batch(work, identity, batch)
+    assert next(work.glob("batches/*/*.batch/sentinel")).read_text() == "original"
+
+
+def test_workdir_admission_rejects_existing_final_and_incomplete_state(tmp_path):
+    identity, _ = _storage_fixture()
+    final = tmp_path / "final"
+    final.mkdir()
+    work = tmp_path / "work"
+    with pytest.raises(FileExistsError):
+        run_module._initialize_batch_workdir(work, identity, final_dir=final)
+    assert not work.exists()
+    work.mkdir()
+    (work / "run-state.json").write_text("{")
+    with pytest.raises(ValueError):
+        run_module._initialize_batch_workdir(work, identity, resume=True)
+
+
+def test_batch_round_trip_preserves_nonempty_diagnostics_and_owned_values(tmp_path):
+    from dataclasses import replace
+
+    identity, batch = _storage_fixture()
+    table = pd.DataFrame(
+        {
+            "model": ["arima"],
+            "origin": pd.to_datetime(["2020-01-05"]),
+            "node": ["US"],
+            "value": [1.25],
+            "count": [2],
+        }
+    )
+    names = ("forecast_diagnostics", "tuning", "quantile_repairs", "warnings")
+    batch = replace(
+        batch, diagnostics=DiagnosticsTables(**{name: table for name in names})
+    )
+    work = tmp_path / "work"
+    run_module._initialize_batch_workdir(work, identity)
+    path = run_module._write_origin_batch(work, identity, batch)
+    restored = _read_batch(path, identity, batch)
+    for name in names:
+        pd.testing.assert_frame_equal(getattr(restored.diagnostics, name), table)
+    restored.diagnostics.forecast_diagnostics.loc[0, "value"] = 99
+    assert (
+        _read_batch(path, identity, batch).diagnostics.forecast_diagnostics.loc[
+            0, "value"
+        ]
+        == 1.25
+    )
+
+
+@pytest.mark.parametrize("schema", ["columns", "dtypes"])
+def test_batch_rejects_payload_schema_corruption(tmp_path, schema):
+    import json
+
+    identity, batch = _storage_fixture()
+    work = tmp_path / "work"
+    run_module._initialize_batch_workdir(work, identity)
+    path = run_module._write_origin_batch(work, identity, batch)
+    manifest = path / "batch.json"
+    payload = json.loads(manifest.read_text())
+    payload["payloads"]["tuning.parquet"][schema] = ["incorrect"]
+    manifest.write_text(json.dumps(payload))
+    with pytest.raises(ValueError):
+        _read_batch(path, identity, batch)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("schema_version", True),
+        ("target_index", 3.0),
+        ("seed_spawn_key", [0.0, 0.0, 3.0]),
+    ],
+)
+def test_batch_rejects_coercible_identity_types(tmp_path, field, value):
+    import json
+
+    identity, batch = _storage_fixture()
+    work = tmp_path / "work"
+    run_module._initialize_batch_workdir(work, identity)
+    path = run_module._write_origin_batch(work, identity, batch)
+    manifest = path / "batch.json"
+    payload = json.loads(manifest.read_text())
+    payload[field] = value
+    manifest.write_text(json.dumps(payload))
+    with pytest.raises(ValueError):
+        _read_batch(path, identity, batch)

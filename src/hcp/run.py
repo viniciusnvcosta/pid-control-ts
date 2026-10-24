@@ -35,7 +35,20 @@ from matplotlib import pyplot as plt
 
 # RunConfig, load_config and panel_config are re-exported as part of the run API.
 from hcp.benchmark import BenchmarkResult, run_benchmark
-from hcp.benchmark_batch import DeviceProvenance, NeuralExecution, device_identity
+from hcp.benchmark_batch import (
+    BATCH_PAYLOADS,
+    DIAGNOSTIC_PAYLOADS,
+    DeviceProvenance,
+    ExecutionIdentity,
+    NeuralExecution,
+    OriginForecastBatch,
+    ProgressSnapshot,
+    batch_metadata,
+    contract_json,
+    device_identity,
+    payload_digest,
+    validate_batch_metadata,
+)
 from hcp.benchmark_data import canonical_actuals, reference_bundle
 from hcp.benchmark_report import benchmark_figures
 from hcp.config import (
@@ -55,6 +68,7 @@ from hcp.data import (
 from hcp.eligibility import EligibilityRule, eligibility, require_eligible
 from hcp.experiment import PRIMARY, ExperimentResult, run_experiment
 from hcp.forecast import generate_model_bundles
+from hcp.forecast_types import DiagnosticsTables
 from hcp.panel import PRIMARY as PANEL_PRIMARY
 from hcp.panel import PanelResult, run_panel
 from hcp.report import render_figures, render_panel_figures
@@ -73,9 +87,15 @@ def _query_nvidia_identity(device_index: int) -> Mapping[str, str]:
         raise RuntimeError("only CUDA device zero is registered")
     try:
         completed = subprocess.run(
-            ["nvidia-smi", "--query-gpu=uuid,driver_version",
-             "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, check=False, timeout=10,
+            [
+                "nvidia-smi",
+                "--query-gpu=uuid,driver_version",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
         )
         if completed.returncode:
             raise RuntimeError("NVIDIA identity query failed")
@@ -673,6 +693,238 @@ def main(argv: list[str] | None = None) -> int:
         out = write_artifacts(cfg, result, file_sha256(cfg.data_path))
     print(f"Artifacts: {out}")
     return 0
+
+
+def _compact_json(payload: object) -> str:
+    """Encode strict compact JSON for persisted contracts."""
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
+def _validate_batch_state(workdir: Path, identity: ExecutionIdentity) -> None:
+    """Fail closed when immutable run provenance differs."""
+    try:
+        if _compact_json(
+            json.loads((workdir / "run-state.json").read_text())
+        ) != _compact_json(contract_json(identity)):
+            raise ValueError("run-state identity mismatch")
+    except (OSError, ValueError, TypeError) as exc:
+        raise ValueError("invalid run-state identity") from exc
+
+
+def _initialize_batch_workdir(
+    workdir: Path,
+    identity: ExecutionIdentity,
+    *,
+    resume: bool = False,
+    final_dir: Path | None = None,
+) -> None:
+    """Create immutable state or validate existing state on explicit resume.
+
+    Args:
+        workdir: Fixed partial-results directory.
+        identity: Current execution provenance.
+        resume: Validate existing state without rewriting it.
+        final_dir: Optional final destination which must remain absent.
+    """
+    if final_dir is not None and final_dir.exists():
+        raise FileExistsError(final_dir)
+    if identity.batch_schema_version != 1:
+        raise ValueError("unsupported batch schema version")
+    if resume:
+        _validate_batch_state(workdir, identity)
+        return
+    workdir.mkdir(parents=True, exist_ok=False)
+    with (workdir / "run-state.json").open("x") as stream:
+        stream.write(_compact_json(contract_json(identity)))
+
+
+def _batch_path(workdir: Path, model: str, origin: np.datetime64) -> Path:
+    """Return a safe canonical model/origin location."""
+    if not model or model in (".", "..") or Path(model).name != model:
+        raise ValueError("invalid batch model path")
+    key = str(np.datetime64(origin, "D"))
+    if key == "NaT":
+        raise ValueError("invalid batch origin")
+    return workdir / "batches" / model / f"{key}.batch"
+
+
+def _write_origin_batch(
+    workdir: Path, identity: ExecutionIdentity, batch: OriginForecastBatch
+) -> Path:
+    """Write payloads and manifest last, then publish by no-replace rename."""
+    _validate_batch_state(workdir, identity)
+    metadata = batch_metadata(batch, identity)
+    out = _batch_path(workdir, batch.model, batch.origin)
+    if out.exists():
+        raise FileExistsError(out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    staging = out.with_name(f".{out.name}.{uuid.uuid4().hex}.tmp")
+    staging.mkdir()
+    frames = {
+        "forecasts": pd.DataFrame(
+            {
+                "node": batch.nodes,
+                "q10": batch.quantiles[:, 0],
+                "q50": batch.quantiles[:, 1],
+                "q90": batch.quantiles[:, 2],
+            }
+        ),
+        **{name: getattr(batch.diagnostics, name) for name in DIAGNOSTIC_PAYLOADS},
+    }
+    metadata["payloads"] = {}
+    for name, frame in frames.items():
+        payload = staging / f"{name}.parquet"
+        frame.to_parquet(payload, index=False)
+        metadata["payloads"][payload.name] = {
+            "sha256": payload_digest(payload.read_bytes()),
+            "rows": len(frame),
+            "columns": list(frame.columns),
+            "dtypes": [str(dtype) for dtype in frame.dtypes],
+        }
+    (staging / "batch.json").write_text(_compact_json(metadata))
+    _rename_noreplace(staging, out)
+    return out
+
+
+def _read_origin_batch(
+    path: Path,
+    identity: ExecutionIdentity,
+    *,
+    model: str,
+    target_index: int,
+    target: np.datetime64,
+    origin: np.datetime64,
+    nodes: tuple[str, ...],
+    seed_spawn_key: tuple[int, ...],
+    source_kind: str | None,
+) -> OriginForecastBatch:
+    """Verify canonical identity, every byte hash, payload schema and row count."""
+    try:
+        workdir = path.parents[2]
+        _validate_batch_state(workdir, identity)
+        if path != _batch_path(workdir, model, origin) or path.is_symlink():
+            raise ValueError("batch path differs from expected model/origin")
+        metadata = json.loads((path / "batch.json").read_text())
+        if not isinstance(metadata, dict):
+            raise ValueError("manifest must be an object")  # noqa: TRY004 - corrupt persisted data
+        expected = batch_metadata(
+            OriginForecastBatch(
+                model,
+                target_index,
+                np.datetime64(target),
+                np.datetime64(origin),
+                seed_spawn_key,
+                nodes,
+                np.zeros((len(nodes), 3)),
+                source_kind,
+                DiagnosticsTables(),
+                metadata["warning_counts"],
+                tuple(metadata["interpolation"]),
+                metadata["elapsed_seconds"],
+            ),
+            identity,
+        )
+        validate_batch_metadata(metadata, expected)
+        if {entry.name for entry in path.iterdir()} != {"batch.json"} | set(
+            metadata["payloads"]
+        ):
+            raise ValueError("extra or missing batch payload")
+        frames = {}
+        for name in BATCH_PAYLOADS:
+            payload = path / f"{name}.parquet"
+            descriptor = metadata["payloads"][payload.name]
+            if (
+                payload.is_symlink()
+                or payload_digest(payload.read_bytes()) != descriptor["sha256"]
+            ):
+                raise ValueError("batch payload hash mismatch")
+            frame = pd.read_parquet(payload)
+            if (
+                len(frame) != descriptor["rows"]
+                or list(frame.columns) != descriptor["columns"]
+                or [str(dtype) for dtype in frame.dtypes] != descriptor["dtypes"]
+            ):
+                raise ValueError("batch payload rows/schema mismatch")
+            frames[name] = frame
+        forecasts = frames.pop("forecasts")
+        if list(forecasts.columns) != ["node", "q10", "q50", "q90"] or tuple(
+            forecasts.node
+        ) != tuple(nodes):
+            raise ValueError("forecast node/schema mismatch")
+        quantiles = forecasts[["q10", "q50", "q90"]].to_numpy(dtype=float)
+        if not np.isfinite(quantiles).all() or np.any(np.diff(quantiles, axis=1) < 0):
+            raise ValueError("invalid persisted quantiles")
+        return OriginForecastBatch(
+            model,
+            target_index,
+            np.datetime64(target),
+            np.datetime64(origin),
+            seed_spawn_key,
+            nodes,
+            quantiles,
+            source_kind,
+            DiagnosticsTables(**frames),
+            metadata["warning_counts"],
+            tuple(metadata["interpolation"]),
+            metadata["elapsed_seconds"],
+        )
+    except Exception as exc:
+        raise ValueError(f"invalid origin batch: {path}") from exc
+
+
+def _write_progress(workdir: Path, snapshot: ProgressSnapshot) -> None:
+    """Atomically replace advisory progress without changing immutable state."""
+    temporary = workdir / f".progress.{uuid.uuid4().hex}.tmp"
+    temporary.write_text(_compact_json(contract_json(snapshot)))
+    os.replace(temporary, workdir / "progress.json")
+
+
+def _append_runtime_event(workdir: Path, event: Mapping[str, object]) -> None:
+    """Append one compact JSON object and newline per event."""
+    line = _compact_json(dict(event)) + "\n"
+    with (workdir / "runtime.jsonl").open("a") as stream:
+        stream.write(line)
+
+
+def _read_runtime_events(workdir: Path) -> tuple[dict, ...]:
+    """Read event objects, tolerating only an incomplete final JSON line."""
+    path = workdir / "runtime.jsonl"
+    if not path.exists():
+        return ()
+    lines = path.read_bytes().splitlines(keepends=True)
+    events = []
+    for index, line in enumerate(lines):
+        final_fragment = index == len(lines) - 1 and not line.endswith(b"\n")
+        try:
+            text = line.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            if not final_fragment or exc.reason != "unexpected end of data":
+                raise ValueError("invalid runtime event encoding") from exc
+            text = line[: exc.start].decode("utf-8")
+        try:
+
+            def reject_constant(value: str) -> None:
+                raise ValueError(f"invalid JSON constant: {value}")
+
+            event = json.loads(text, parse_constant=reject_constant)
+        except json.JSONDecodeError as exc:
+            tail = text[exc.pos :]
+            incomplete = (
+                exc.pos == len(text)
+                or exc.msg.startswith("Unterminated string")
+                or (
+                    exc.msg == "Expecting value"
+                    and tail
+                    in ("t", "tr", "tru", "f", "fa", "fal", "fals", "n", "nu", "nul")
+                )
+            )
+            if final_fragment and incomplete:
+                break
+            raise ValueError("invalid runtime event line") from exc
+        if not isinstance(event, dict):
+            raise ValueError("runtime event must be an object")  # noqa: TRY004 - corrupt persisted data
+        events.append(event)
+    return tuple(events)
 
 
 if __name__ == "__main__":

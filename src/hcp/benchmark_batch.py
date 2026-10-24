@@ -270,9 +270,14 @@ def device_identity(
     if properties.name != execution.required_gpu_name:
         raise ValueError("selected GPU differs from registered GPU")
     result = DeviceProvenance(
-        execution.device, 0, gpu_uuid, properties.name,
-        tuple(torch_module.cuda.get_device_capability(0)), driver,
-        str(torch_module.__version__), str(torch_module.version.cuda),
+        execution.device,
+        0,
+        gpu_uuid,
+        properties.name,
+        tuple(torch_module.cuda.get_device_capability(0)),
+        driver,
+        str(torch_module.__version__),
+        str(torch_module.version.cuda),
         torch_module.are_deterministic_algorithms_enabled(),
         torch_module.backends.cuda.matmul.allow_tf32,
         torch_module.backends.cudnn.allow_tf32,
@@ -282,8 +287,82 @@ def device_identity(
     if (
         not result.deterministic_algorithms
         or torch_module.is_deterministic_algorithms_warn_only_enabled()
-        or result.matmul_allow_tf32 or result.cudnn_allow_tf32
+        or result.matmul_allow_tf32
+        or result.cudnn_allow_tf32
         or result.float32_matmul_precision != "highest"
     ):
         raise ValueError("deterministic CUDA settings could not be established")
     return result
+
+
+BATCH_SCHEMA_VERSION = 1
+DIAGNOSTIC_PAYLOADS = ("forecast_diagnostics", "tuning", "quantile_repairs", "warnings")
+BATCH_PAYLOADS = ("forecasts",) + DIAGNOSTIC_PAYLOADS
+
+
+def contract_json(value: object) -> dict:
+    """Return a detached JSON representation of a frozen contract dataclass."""
+    return _json_value(
+        {field.name: getattr(value, field.name) for field in fields(value)}
+    )
+
+
+def payload_digest(payload: bytes) -> str:
+    """Return the exact persisted payload's SHA-256 without performing I/O."""
+    return hashlib.sha256(payload).hexdigest()
+
+
+def batch_metadata(batch: OriginForecastBatch, identity: ExecutionIdentity) -> dict:
+    """Build scalar batch metadata bound to the immutable execution identity."""
+    if identity.batch_schema_version != BATCH_SCHEMA_VERSION:
+        raise ValueError("unsupported batch schema version")
+    if batch.model not in identity.model_order:
+        raise ValueError("batch model differs from execution identity")
+    if batch.seed_spawn_key[-2:] != (
+        identity.model_order.index(batch.model),
+        batch.target_index,
+    ):
+        raise ValueError("batch seed address differs from model/target identity")
+    return {
+        "schema_version": BATCH_SCHEMA_VERSION,
+        "execution_digest": execution_identity_digest(identity),
+        "model": batch.model,
+        "target_index": batch.target_index,
+        "target": str(batch.target),
+        "origin": str(batch.origin),
+        "seed_spawn_key": list(batch.seed_spawn_key),
+        "nodes": list(batch.nodes),
+        "source_kind": batch.source_kind,
+        "warning_counts": _json_value(batch.warning_counts),
+        "interpolation": _json_value(batch.interpolation),
+        "elapsed_seconds": batch.elapsed_seconds,
+    }
+
+
+def validate_batch_metadata(metadata: dict, expected: dict) -> None:
+    """Reject missing, extra or mismatched manifest identity fields."""
+    if set(metadata) != set(expected) | {"payloads"}:
+        raise ValueError("batch manifest schema differs")
+    if any(
+        json.dumps(metadata[name], sort_keys=True, allow_nan=False)
+        != json.dumps(value, sort_keys=True, allow_nan=False)
+        for name, value in expected.items()
+    ):
+        raise ValueError("batch metadata differs from expected identity")
+    payloads = metadata["payloads"]
+    if not isinstance(payloads, dict) or set(payloads) != {
+        f"{name}.parquet" for name in BATCH_PAYLOADS
+    }:
+        raise ValueError("batch payload schema differs")
+    for record in payloads.values():
+        if (
+            not isinstance(record, dict)
+            or set(record) != {"sha256", "rows", "columns", "dtypes"}
+            or type(record["rows"]) is not int
+            or record["rows"] < 0
+            or not isinstance(record["sha256"], str)
+            or len(record["sha256"]) != 64
+            or not isinstance(record["columns"], list)
+            or not isinstance(record["dtypes"], list)
+        ):
+            raise ValueError("invalid batch payload descriptor")

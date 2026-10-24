@@ -162,17 +162,38 @@ def test_neural_execution_cpu_fixture_contract() -> None:
 
 def test_forecast_types_has_module_docstring():
     import hcp.forecast_types as module
-    assert module.__doc__ == "In-memory forecast contracts with defensive array ownership."
+
+    assert (
+        module.__doc__ == "In-memory forecast contracts with defensive array ownership."
+    )
 
 
 def test_device_identity_is_pure_and_rejects_missing_driver():
     from types import SimpleNamespace
+
     api = _contract_api()
     probe = getattr(api, "device_identity", None)
     assert probe is not None, "pure device identity normalization is absent"
-    execution = api.NeuralExecution("cuda:0", "NVIDIA GeForce RTX 4080", ":4096:8", False, "32-true")
-    torch = SimpleNamespace(cuda=SimpleNamespace(
-        get_device_properties=lambda index: SimpleNamespace(name=execution.required_gpu_name, uuid="GPU-test"),
-        get_device_capability=lambda index: (8, 9)))
+    execution = api.NeuralExecution(
+        "cuda:0", "NVIDIA GeForce RTX 4080", ":4096:8", False, "32-true"
+    )
+    torch = SimpleNamespace(
+        cuda=SimpleNamespace(
+            get_device_properties=lambda index: SimpleNamespace(
+                name=execution.required_gpu_name, uuid="GPU-test"
+            ),
+            get_device_capability=lambda index: (8, 9),
+        )
+    )
     with pytest.raises(ValueError, match="driver"):
         probe(execution, torch, {})
+
+
+def test_payload_metadata_digest_and_execution_binding_are_pure():
+    api = _contract_api()
+    import hashlib
+
+    assert api.payload_digest(b"payload") == hashlib.sha256(b"payload").hexdigest()
+    payload = api.contract_json(_identity({}, {}))
+    payload["runtime_provenance"]["changed"] = True
+    assert "changed" not in _identity({}, {}).runtime_provenance
