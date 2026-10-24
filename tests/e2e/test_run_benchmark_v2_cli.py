@@ -480,4 +480,13 @@ def test_cli_resumes_after_two_batches_before_evaluating(tmp_path, monkeypatch, 
     events = run_module._read_runtime_events(out)
     assert [event["event"] for event in events].count("evaluation_start") == 1
     assert [event["event"] for event in events].count("resume_skip") == 2
-    assert len(capsys.readouterr().out.splitlines()) == 11
+    assert events[-1]["event"] == "publication-ready"
+    lines = capsys.readouterr().out.splitlines()
+    assert len(lines) == 13
+    completion = [json.loads(line) for line in lines if line.startswith("{")]
+    assert len(completion) == 1
+    assert completion[0]["event"] == "publication-complete"
+    assert (
+        completion[0]["execution_identity_digest"]
+        == manifest["execution_identity_digest"]
+    )

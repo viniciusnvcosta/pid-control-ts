@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 
 from hcp.benchmark_data import ActualPanel
+from hcp.benchmark_reconciliation import reconciliation_tables
 from hcp.benchmark_stats import ARM_CELLS, v2_contrast_tables
 from hcp.conformal import fixed_pi_scales
 from hcp.data import ROOT, TERRITORIES, HierarchyBundle
@@ -443,12 +444,14 @@ def _run_benchmark_v2(
         )
         for block, seed in zip(cfg.panel.blocks, seeds[:-1], strict=True)
     }
+    evidence = {model: {} for model in order}
     arms = {
         model: forecaster_arms(
             bundles[model],
             cfg.panel,
             evaluation_index=start,
             fixed_pi_scales=pi_scales,
+            reconciliation_evidence=evidence[model],
         )
         for model in order
     }
@@ -467,11 +470,22 @@ def _run_benchmark_v2(
         )
         metrics.append(metric_frame)
         levels.append(level_frame)
-        forecasts.append(_base_forecasts(model, bundles[model]))
+        base = _base_forecasts(model, bundles[model])
+        base["source_kind"] = (
+            "submitted_quantiles"
+            if model == cfg.reference_model
+            else "native_quantiles"
+            if model == "qr_l1"
+            else "sample_derived"
+        )
+        forecasts.append(base)
     intervention, reference_contrasts = v2_contrast_tables(
         arms, draws, alpha=cfg.panel.controller.alpha, window=cfg.panel.rolling_window
     )
-    return BenchmarkResult(
+    stage_tables = [
+        reconciliation_tables(model, bundles[model], evidence[model]) for model in order
+    ]
+    result = BenchmarkResult(
         base_forecasts=pd.concat(forecasts, ignore_index=True),
         intervals=pd.concat(intervals, ignore_index=True),
         metrics=pd.concat(metrics, ignore_index=True),
@@ -489,5 +503,54 @@ def _run_benchmark_v2(
             "pi_scales": dict(zip(reference.nodes, pi_scales.tolist(), strict=True)),
             "models": {model: arms[model].diagnostics for model in order},
         },
-        tables=DiagnosticsTables(),
+        tables=DiagnosticsTables(
+            **{
+                name: pd.concat(
+                    [getattr(tables, name) for tables in stage_tables],
+                    ignore_index=True,
+                )
+                for name in (
+                    "forecast_diagnostics",
+                    "tuning",
+                    "quantile_repairs",
+                    "warnings",
+                )
+            }
+        ),
     )
+    validate_finite_benchmark(result)
+    return result
+
+
+def validate_finite_benchmark(result: BenchmarkResult) -> None:
+    """Reject nonfinite numeric metrics and inferential summaries with cell context.
+
+    Args:
+        result: Evaluated tables, including descriptive cells.
+
+    Raises:
+        ValueError: On the first nonfinite scored or inferential cell.
+    """
+    for table in ("metrics", "level_metrics", "hierarchy_contrasts", "model_contrasts"):
+        frame = getattr(result, table)
+        for column in frame.select_dtypes(include="number"):
+            invalid = ~np.isfinite(frame[column].to_numpy(dtype=float))
+            if invalid.any():
+                row = frame.iloc[np.flatnonzero(invalid)[0]]
+                context = " ".join(
+                    f"{key}={row[key]}"
+                    for key in (
+                        "model",
+                        "reconciler",
+                        "controller",
+                        "node",
+                        "level",
+                        "arm",
+                        "contrast",
+                        "block",
+                    )
+                    if key in row.index
+                )
+                raise ValueError(
+                    f"nonfinite {table}: {context} metric={column} value={row[column]}"
+                )

@@ -1,14 +1,21 @@
 # ABOUTME: Runs every v2 forecast adapter on a reduced real-data development slice.
-# ABOUTME: Checks cutoff alignment and bundle shapes without evaluating registered contrasts or publishing results.
+# ABOUTME: Checks cutoffs and real diagnostic persistence with temporary development artifacts.
+import json
 from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from hcp.benchmark_data import ActualPanel, canonical_actuals, reference_bundle
 from hcp.data import FORECASTER, file_sha256, read_forecasts
-from hcp.forecast import ForecastConfig, generate_model_bundles
+from hcp.forecast import (
+    ForecastConfig,
+    assemble_model_bundles,
+    generate_origin_batch,
+    plan_model_forecasts,
+)
 from hcp.forecast_types import V2ModelSettings
 from tests.helpers import REAL_DATA, REAL_SHA256
 
@@ -33,6 +40,7 @@ MODELS = (
 
 def test_all_v2_adapters_integrate_with_reduced_real_data_and_preserve_cutoff(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Exercise all adapters with one real origin and development-only budgets."""
     assert file_sha256(REAL_DATA) == REAL_SHA256
@@ -69,7 +77,12 @@ def test_all_v2_adapters_integrate_with_reduced_real_data_and_preserve_cutoff(
         protocol_version=2,
         v2_settings=settings,
     )
-    generated = generate_model_bundles(actuals, target, cutoff, config)
+    plan = plan_model_forecasts(actuals, target, cutoff, config)
+    batches = tuple(
+        generate_origin_batch(plan, model, index, config)
+        for model, index in plan.eligible_keys
+    )
+    generated = assemble_model_bundles(plan, batches, config)
 
     assert set(generated.bundles) == set(MODELS)
     assert generated.diagnostics["models"].keys() == set(MODELS)
@@ -82,3 +95,82 @@ def test_all_v2_adapters_integrate_with_reduced_real_data_and_preserve_cutoff(
     assert all(target[0] > cutoff[0] for _ in MODELS)
     assert not (output_dir / development_run_id).exists()
     assert not output_dir.exists()
+
+    tuning = generated.tables.tuning
+    transformer = tuning[tuning["model"] == "transformer"]
+    assert transformer["candidate"].tolist() == ["32"]
+    assert transformer["selected"].tolist() == [True]
+    assert np.isfinite(transformer["score"]).all()
+    events = generated.tables.forecast_diagnostics
+    assert set(events.loc[events["name"] == "origin_seed", "model"]) == set(MODELS)
+    assert {"streams", "final_fit", "node_seeds"}.issubset(set(events["name"]))
+
+    # Persist the real adapter tables through the same exact-resume and final
+    # writer boundaries as the CLI. Expensive adapter fits above run only once.
+    from matplotlib import pyplot as plt
+
+    from hcp import run as runtime
+    from tests.unit.test_run_benchmark_v2 import (
+        _cfg,
+        _result,
+        _storage_fixture,
+    )
+
+    cfg = _cfg(tmp_path)
+    identity = replace(
+        _storage_fixture()[0],
+        git_sha="a" * 40,
+        model_order=MODELS,
+        root_seed=config.root_seed,
+        run_id=cfg.run_id,
+    )
+    work = tmp_path / "real-adapter-batches"
+    runtime._initialize_batch_workdir(work, identity)
+    for batch in batches:
+        runtime._write_origin_batch(work, identity, batch)
+
+    monkeypatch.setattr(
+        runtime,
+        "generate_origin_batch",
+        lambda *args: pytest.fail("resumed real adapter must not fit again"),
+    )
+    resumed, summary = runtime._generate_or_resume_v2(plan, config, identity, work)
+    assert summary.resumed_batches == 7
+    # Canonical JSON compares nested numeric lists after Arrow restores them as
+    # arrays; actual candidate/scale/stream evidence must remain unchanged.
+    from hcp.forecast_diagnostics import diagnostic_records
+
+    for name in ("forecast_diagnostics", "tuning", "quantile_repairs", "warnings"):
+        before = diagnostic_records(getattr(generated.tables, name))
+        after = diagnostic_records(getattr(resumed.tables, name))
+        assert before == after
+    for model in MODELS:
+        np.testing.assert_array_equal(
+            resumed.bundles[model].q, generated.bundles[model].q
+        )
+    summary = replace(summary, workdir=cfg.output_dir / f".{cfg.run_id}.partial")
+    summary.workdir.parent.mkdir(parents=True, exist_ok=True)
+    work.rename(summary.workdir)
+    monkeypatch.setattr(runtime, "require_clean_git", lambda repo: "a" * 40)
+    monkeypatch.setattr(
+        runtime, "benchmark_figures", lambda *args, **kwargs: {"slice": plt.figure()}
+    )
+    published = runtime._finalize_benchmark_v2_artifacts(
+        cfg, _result(), resumed, summary, "datahash", Path.cwd()
+    )
+    manifest = json.loads((published / "manifest.json").read_text())
+    selected = manifest["diagnostic_summary"]["selected_candidates"]
+    assert {row["model"] for row in selected} == {
+        "qr_l1",
+        "transformer",
+        "deepar_enhanced",
+    }
+    assert len([row for row in selected if row["model"] == "qr_l1"]) == 2
+    for model in ("transformer", "deepar_enhanced"):
+        (selected_row,) = [row for row in selected if row["model"] == model]
+        assert selected_row["best_epoch"] == selected_row["epochs_run"] == 1
+        assert len(selected_row["scales"]) == 2
+    final_events = pd.read_parquet(published / "forecast_diagnostics.parquet")
+    assert diagnostic_records(final_events) == diagnostic_records(
+        resumed.tables.forecast_diagnostics
+    )

@@ -29,7 +29,7 @@ import time
 import uuid
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
@@ -42,7 +42,7 @@ from matplotlib import pyplot as plt
 from core import methods
 
 # RunConfig, load_config and panel_config are re-exported as part of the run API.
-from hcp.benchmark import BenchmarkResult, run_benchmark
+from hcp.benchmark import BenchmarkResult, run_benchmark, validate_finite_benchmark
 from hcp.benchmark_batch import (
     BATCH_PAYLOADS,
     DIAGNOSTIC_PAYLOADS,
@@ -54,6 +54,7 @@ from hcp.benchmark_batch import (
     batch_metadata,
     contract_json,
     device_identity,
+    execution_identity_digest,
     payload_digest,
     validate_batch_metadata,
 )
@@ -84,6 +85,7 @@ from hcp.forecast import (
     plan_model_forecasts,
 )
 from hcp.forecast_assembly import _seed_key, _source_kind
+from hcp.forecast_diagnostics import diagnostic_records
 from hcp.forecast_types import DiagnosticsTables, ForecastPlan, ForecastResult
 from hcp.panel import PRIMARY as PANEL_PRIMARY
 from hcp.panel import PanelResult, run_panel
@@ -486,6 +488,7 @@ def _write_benchmark_v2_artifacts(
         for path in staging.rglob("*"):
             _reject_symlink_path(path)
     try:
+        validate_finite_benchmark(result)
         tables = {
             "base_forecasts": result.base_forecasts,
             "intervals": result.intervals,
@@ -571,25 +574,35 @@ def _write_benchmark_v2_artifacts(
             "scales": result.diagnostics.get("pi_scales", {}),
         }
         manifest["diagnostic_summary"] = {
-            "selected_candidates": result.tables.tuning.loc[
-                result.tables.tuning.get("selected", pd.Series(dtype=bool)).fillna(
-                    False
-                )
-            ].to_dict(orient="records"),
-            "repairs": result.tables.quantile_repairs.to_dict(orient="records"),
-            "warnings": result.tables.warnings.to_dict(orient="records"),
-            "forecast_events": result.tables.forecast_diagnostics.to_dict(
-                orient="records"
+            "selected_candidates": diagnostic_records(
+                result.tables.tuning.loc[
+                    result.tables.tuning.get("selected", pd.Series(dtype=bool)).fillna(
+                        False
+                    )
+                ]
             ),
+            "repairs": diagnostic_records(result.tables.quantile_repairs),
+            "warnings": diagnostic_records(result.tables.warnings),
+            "forecast_events": diagnostic_records(result.tables.forecast_diagnostics),
         }
         manifest["families"] = {
             "hierarchy": {
                 "size": 96,
-                "definition": "(block, model, level, controller, metric)",
+                "definition": "(block, family)",
+                "members": "8 models × 2 metrics × 6 A-D contrasts",
+                "arms": {
+                    "A": "none/raw",
+                    "B": "none/pi_norm",
+                    "C": "mint_median/raw",
+                    "D": "mint_median/pi_norm",
+                },
+                "adjustment_scope": "separate Holm family per block; no study-wide guarantee",
             },
             "model": {
                 "size": 56,
-                "definition": "(block, level, controller, reconciler, metric)",
+                "definition": "(block, family)",
+                "members": "7 generated models × 4 matched principal arms × 2 metrics",
+                "adjustment_scope": "separate Holm family per block; no study-wide guarantee",
             },
         }
         manifest["versions"].update(
@@ -629,6 +642,7 @@ def _write_benchmark_v2_artifacts(
             identity = resume_summary.identity
             manifest["execution"] = contract_json(identity)["runtime_provenance"]
             manifest["execution_identity"] = contract_json(identity)
+            manifest["execution_identity_digest"] = execution_identity_digest(identity)
             manifest["provenance"] = {
                 "config_sha256": identity.config_sha256,
                 "lockfile_sha256": identity.lockfile_sha256,
@@ -638,6 +652,13 @@ def _write_benchmark_v2_artifacts(
                 "resumed_batches": resume_summary.resumed_batches,
                 "generated_batches": resume_summary.generated_batches,
                 "total_batches": resume_summary.total_batches,
+            }
+            _runtime_event(
+                staging, "publication-ready", destination=str(out), completion=False
+            )
+            manifest["publication"] = {
+                "state": "ready",
+                "completion_evidence": "atomic no-replace rename returned successfully; reported externally",
             }
             manifest["artifacts"] = {
                 str(path.relative_to(staging)): file_sha256(path)
@@ -655,6 +676,19 @@ def _write_benchmark_v2_artifacts(
                 f"Git HEAD changed before publication: {initial_sha} -> {current_sha}"
             )
         _rename_noreplace(staging, out)
+        if resume_summary is not None:
+            print(
+                _compact_json(
+                    {
+                        "event": "publication-complete",
+                        "destination": str(out),
+                        "execution_identity_digest": execution_identity_digest(
+                            resume_summary.identity
+                        ),
+                    }
+                ),
+                flush=True,
+            )
         return out
     except BaseException:
         if resume_summary is None:
@@ -733,6 +767,23 @@ def _finalize_benchmark_v2_artifacts(
     """
     if summary.workdir != cfg.output_dir / f".{cfg.run_id}.partial":
         raise ValueError("unexpected finalization work directory")
+    result = replace(
+        result,
+        tables=DiagnosticsTables(
+            **{
+                name: pd.concat(
+                    [getattr(generated.tables, name), getattr(result.tables, name)],
+                    ignore_index=True,
+                )
+                for name in (
+                    "forecast_diagnostics",
+                    "tuning",
+                    "quantile_repairs",
+                    "warnings",
+                )
+            }
+        ),
+    )
     return _write_benchmark_v2_artifacts(
         cfg,
         result,

@@ -9,10 +9,12 @@ from darts import TimeSeries
 from darts.models import RNNModel, TransformerModel
 from darts.utils.likelihood_models import GaussianLikelihood
 from darts.utils.utils import MAX_TORCH_SEED_VALUE
+from pytorch_lightning import LightningModule, Trainer
 
 from hcp import forecast_transformer_module
 from hcp.benchmark_batch import NeuralExecution
 from hcp.forecast_neural_validation import (
+    CandidateSelection,
     CandidateTrainingResult,
     NeuralEpochCallback,
     PhaseCapture,
@@ -189,7 +191,9 @@ class TransformerCandidate:
         """Advance one epoch for characterization callers."""
         self._fit_epochs(1)
 
-    def _fit_epochs(self, epochs, selection=None):
+    def _fit_epochs(
+        self, epochs: int, selection: CandidateSelection | None = None
+    ) -> None:
         callback = NeuralEpochCallback(self, epochs, selection)
         self.model.trainer_params["callbacks"] = [callback]
         with quiet_neural_logs():
@@ -200,7 +204,7 @@ class TransformerCandidate:
                 dataloader_kwargs={"num_workers": 0, "pin_memory": False},
             )
 
-    def _finish_epoch(self, trainer, module):
+    def _finish_epoch(self, trainer: Trainer, module: LightningModule) -> None:
         # Darts normally assigns model only after fit returns. Nested scoring needs it now.
         self.model.model = module
         loss = trainer.callback_metrics.get("train_loss")
@@ -212,7 +216,9 @@ class TransformerCandidate:
             raise ValueError("Transformer training produced nonfinite loss or weights")
         self.epochs_trained += 1
 
-    def _resume_training(self, trainer, module, another_epoch):
+    def _resume_training(
+        self, trainer: Trainer, module: LightningModule, another_epoch: bool
+    ) -> None:
         self.model.trainer = trainer
         module._trainer = trainer
         # Nested Darts prediction teardown moves the shared module back to CPU.
@@ -338,10 +344,15 @@ def transformer_prediction(
                     k: tuple(c.spawn_key for c in v) for k, v in streams.items()
                 },
                 "tuning": [
-                    {**record, "scales": inner_scales.copy()}
+                    {
+                        **record,
+                        "width": settings.transformer_d_model,
+                        "scales": inner_scales.copy(),
+                    }
                     for record in selection.tuning.to_dict("records")
                 ],
                 "final_fit": {
+                    "width": settings.transformer_d_model,
                     "scales": candidate.scales.copy(),
                     "epochs": selection.best_epoch,
                 },
