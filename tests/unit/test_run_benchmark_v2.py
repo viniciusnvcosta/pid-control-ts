@@ -927,6 +927,30 @@ def test_resume_executes_only_missing_batches_and_preserves_science(
     from hcp.forecast import FORECASTERS
 
     cfg, plan, identity, calls = _resume_fixture(monkeypatch)
+    from dataclasses import replace
+
+    original_generate = run_module.generate_origin_batch
+
+    def populated(*args):
+        batch = original_generate(*args)
+        tables = {
+            name: (
+                getattr(batch.diagnostics, name)
+                if not getattr(batch.diagnostics, name).empty
+                else pd.DataFrame(
+                    {"model": [batch.model], "selected": [True], "value": [1.0]}
+                )
+            )
+            for name in (
+                "forecast_diagnostics",
+                "tuning",
+                "quantile_repairs",
+                "warnings",
+            )
+        }
+        return replace(batch, diagnostics=DiagnosticsTables(**tables))
+
+    monkeypatch.setattr(run_module, "generate_origin_batch", populated)
     execute = getattr(run_module, "_generate_or_resume_v2", None)
     assert execute is not None, "resumable orchestration is absent"
     workdir = tmp_path / ".fixture.partial"
@@ -957,6 +981,7 @@ def test_resume_executes_only_missing_batches_and_preserves_science(
     complete, _ = execute(plan, cfg, identity, tmp_path / "fresh")
     pd.testing.assert_frame_equal(resumed.base_forecasts, complete.base_forecasts)
     for name in ("forecast_diagnostics", "tuning", "quantile_repairs", "warnings"):
+        assert not getattr(resumed.tables, name).empty
         pd.testing.assert_frame_equal(
             getattr(resumed.tables, name), getattr(complete.tables, name)
         )
@@ -1052,3 +1077,165 @@ def test_resume_refuses_corrupted_batch_without_refit(tmp_path, monkeypatch):
         run_module._generate_or_resume_v2(plan, cfg, identity, workdir)
     assert not calls
     assert batch.read_bytes() == b"corrupt"
+
+
+def _finalization_fixture(tmp_path, monkeypatch):
+    from dataclasses import replace
+
+    forecast_cfg, plan, identity, _ = _resume_fixture(monkeypatch)
+    cfg = _cfg(tmp_path)
+    identity = replace(identity, git_sha="a" * 40, run_id=cfg.run_id)
+    workdir = cfg.output_dir / f".{cfg.run_id}.partial"
+    generated, summary = run_module._generate_or_resume_v2(
+        plan, forecast_cfg, identity, workdir
+    )
+    monkeypatch.setattr(run_module, "require_clean_git", lambda repo: "a" * 40)
+    monkeypatch.setattr(
+        run_module,
+        "benchmark_figures",
+        lambda *a, **kw: {f"fig-{n}": plt.figure() for n in range(5)},
+    )
+    return cfg, generated, summary
+
+
+def test_finalize_publishes_verified_evidence_and_hashes_manifest_last(
+    tmp_path, monkeypatch
+):
+    import json
+
+    cfg, generated, summary = _finalization_fixture(tmp_path, monkeypatch)
+    finalize = getattr(run_module, "_finalize_benchmark_v2_artifacts", None)
+    assert finalize is not None, "resumable finalizer is absent"
+    original = Path.write_text
+    manifests = []
+
+    def observe(path, *args, **kwargs):
+        assert not manifests, "run artifact written after manifest"
+        if path.name == "manifest.json":
+            assert len(list(path.parent.glob("*.parquet"))) == 10
+            assert len(list((path.parent / "figures").glob("*.pdf"))) == 5
+            assert not (cfg.output_dir / cfg.run_id).exists()
+            manifests.append(path)
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", observe)
+    out = finalize(cfg, _result(), generated, summary, "datahash", Path.cwd())
+    assert out == cfg.output_dir / cfg.run_id
+    assert not summary.workdir.exists()
+    manifest = json.loads((out / "manifest.json").read_text())
+    paths = {str(p.relative_to(out)) for p in out.rglob("*") if p.is_file()}
+    assert set(manifest["artifacts"]) == paths - {"manifest.json"}
+    for name, digest in manifest["artifacts"].items():
+        assert digest == run_module.file_sha256(out / name)
+    assert (
+        manifest["execution"]
+        == run_module.contract_json(summary.identity)["runtime_provenance"]
+    )
+    assert manifest["resume"] == {
+        "completed_batches": 4,
+        "resumed_batches": 0,
+        "generated_batches": 4,
+        "total_batches": 4,
+    }
+    assert (
+        "run-state.json" in paths
+        and "runtime.jsonl" in paths
+        and "progress.json" in paths
+    )
+    assert len(list(out.glob("batches/*/*.batch"))) == 4
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "git",
+        "dirty",
+        "batch",
+        "render",
+        "existing",
+        "race",
+        "late_batch",
+        "late_git",
+        "publish_error",
+    ],
+)
+def test_finalize_preserves_workdir_and_destination_on_failure(
+    tmp_path, monkeypatch, fault
+):
+    cfg, generated, summary = _finalization_fixture(tmp_path, monkeypatch)
+    finalize = getattr(run_module, "_finalize_benchmark_v2_artifacts", None)
+    assert finalize is not None, "resumable finalizer is absent"
+    out = cfg.output_dir / cfg.run_id
+    sentinel = out / "sentinel"
+    if fault == "git":
+        monkeypatch.setattr(run_module, "require_clean_git", lambda repo: "b" * 40)
+    elif fault == "dirty":
+
+        def dirty(repo):
+            raise RuntimeError("Git working tree is not clean")
+
+        monkeypatch.setattr(run_module, "require_clean_git", dirty)
+    elif fault == "late_git":
+        shas = iter(("a" * 40, "b" * 40))
+        monkeypatch.setattr(run_module, "require_clean_git", lambda repo: next(shas))
+    elif fault == "publish_error":
+
+        def unavailable(source, destination):
+            raise OSError("atomic publication unavailable")
+
+        monkeypatch.setattr(run_module, "_rename_noreplace", unavailable)
+    elif fault == "batch":
+        next(summary.workdir.glob("batches/*/*.batch/forecasts.parquet")).write_bytes(
+            b"bad"
+        )
+    elif fault == "render":
+
+        def render(*args, **kwargs):
+            raise RuntimeError("render failed")
+
+        monkeypatch.setattr(run_module, "benchmark_figures", render)
+    elif fault == "existing":
+        out.mkdir()
+        sentinel.write_text("preserve")
+    elif fault == "race":
+        original = run_module._rename_noreplace
+
+        def race(source, destination):
+            destination.mkdir()
+            sentinel.write_text("preserve")
+            original(source, destination)
+
+        monkeypatch.setattr(run_module, "_rename_noreplace", race)
+    elif fault == "late_batch":
+        original_write = Path.write_text
+
+        def damage(path, *args, **kwargs):
+            value = original_write(path, *args, **kwargs)
+            if path.name == "manifest.json":
+                next(
+                    summary.workdir.glob("batches/*/*.batch/forecasts.parquet")
+                ).write_bytes(b"bad")
+            return value
+
+        monkeypatch.setattr(Path, "write_text", damage)
+    with pytest.raises((ValueError, RuntimeError, OSError)):
+        finalize(cfg, _result(), generated, summary, "datahash", Path.cwd())
+    assert summary.workdir.is_dir()
+    assert (summary.workdir / "run-state.json").is_file()
+    assert len(list(summary.workdir.glob("batches/*/*.batch"))) == 4
+    if fault in ("existing", "race"):
+        assert sentinel.read_text() == "preserve"
+    else:
+        assert not out.exists()
+
+
+def test_runtime_console_bounds_and_sanitizes_error_but_preserves_evidence(
+    tmp_path, capsys
+):
+    message = "multiline\n\x1b[31m" + "x" * 2000
+    run_module._runtime_event(tmp_path, "error", message=message)
+    output = capsys.readouterr().out
+    assert len(output.splitlines()) == 1
+    assert "\x1b" not in output
+    assert len(output) <= 300
+    assert run_module._read_runtime_events(tmp_path)[0]["message"] == message
