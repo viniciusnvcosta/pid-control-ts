@@ -21,9 +21,18 @@ def _dependency_warnings():
     records = []
     yield records
     assert len(records) == 32
-    messages = {str(warning.message) for warning in records}
-    assert messages == {
+    environment_warnings = {
         "Can't initialize NVML",
+        "GPU available but not used. You can set it by doing `Trainer(accelerator='gpu')`.",
+    }
+    messages = {
+        "reviewed device availability warning"
+        if str(warning.message) in environment_warnings
+        else str(warning.message)
+        for warning in records
+    }
+    assert messages == {
+        "reviewed device availability warning",
         "You defined a `validation_step` but have no `val_dataloader`. Skipping val loop.",
         "`isinstance(treespec, LeafSpec)` is deprecated, use `isinstance(treespec, TreeSpec) and treespec.is_leaf()` instead.",
         "The 'train_dataloader' does not have many workers which may be a bottleneck. Consider increasing the value of the `num_workers` argument` to `num_workers=7` in the `DataLoader` to improve performance.",

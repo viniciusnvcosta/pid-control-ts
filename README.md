@@ -158,7 +158,8 @@ remains exploratory. Protocol, review, verification, and limitations are recorde
 `docs/analysis/model-benchmarks-v2-protocol-readiness.md`. The prospective CUDA amendment
 registers neural execution on the RTX 4080 (`cuda:0`, deterministic FP32, TF32 disabled).
 Two pre-amendment attempts remain unpublished. CUDA repeatability checks passed twice;
-full verification still has documented warning-fixture and formatting failures.
+full physical-CUDA verification passed after the reviewed warning-fixture and formatting
+fixes; historical failed checks remain recorded in the readiness document.
 After final review, fresh full verification, and explicit launch authorization, use
 an interactive CUDA terminal from this worktree:
 

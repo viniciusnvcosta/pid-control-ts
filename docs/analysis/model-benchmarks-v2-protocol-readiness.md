@@ -1,6 +1,6 @@
 # Model benchmarks v2 protocol readiness
 
-**Status: resumable CUDA scoped gates passed; whole-branch review and full verification remain launch gates.** This is a protocol and verification record, not an outcome report. No official v2 result has been published.
+**Status: resumable CUDA repeatability and full physical-CUDA verification passed; whole-branch review remains a launch gate.** This is a protocol and verification record, not an outcome report. No official v2 result has been published.
 
 ## Registered identity
 
@@ -47,7 +47,7 @@ UV_CACHE_DIR=/tmp/model-benchmarks-v2-cuda uv run --no-sync ruff format --check 
 git diff --check
 ```
 
-Outside the sandbox, the full suite reported **601 passed, 1 skipped, 78 warnings, 1 teardown error (50.68 s)**. The unit DeepAR warning fixture expects `Can't initialize NVML`, whereas the physical GPU supplies `GPU available but not used`; its exact warning-set assertion fails. Ruff lint passed. Format verification failed on existing `src/hcp/forecast_assembly.py:104` (one file would be reformatted; 113 already formatted). These unresolved checks prevent declaring full verification green. Task 9 changes documentation only and leaves fixes to the review wave.
+Outside the sandbox, the full suite reported **601 passed, 1 skipped, 78 warnings, 1 teardown error (50.68 s)**. The unit DeepAR warning fixture expects `Can't initialize NVML`, whereas the physical GPU supplies `GPU available but not used`; its exact warning-set assertion fails. Ruff lint passed. Format verification failed on existing `src/hcp/forecast_assembly.py:104` (one file would be reformatted; 113 already formatted). These were the historical pre-review failures. The authorized Task 9 review fix normalized only the two exact reviewed device-warning alternatives while preserving the count of 32 and every other warning assertion, and applied Ruff formatting to that single call. The focused unit module first reproduced the physical failure (12 passed, 1 teardown error in 2.81 s), then passed outside the sandbox (12 passed in 2.95 s) and inside it (12 passed in 11.61 s). After both fixes, the full suite above ran outside the sandbox on the physical RTX 4080 with `UV_NO_SYNC=1`: **601 passed, 1 skipped, 78 reviewed warnings in 50.37 s**. Ruff lint, Ruff format (114 files already formatted), and `git diff --check` passed. No model numerical logic changed.
 
 ## Interactive launch, monitoring, and exact resume
 
