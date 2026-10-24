@@ -2,12 +2,14 @@
 # ABOUTME: Owns stopping and selected-epoch refits with independent in-memory candidate states.
 """Factory-independent neural selection without checkpoint files or numeric I/O."""
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from typing import Protocol
 
 import numpy as np
 import pandas as pd
+from pytorch_lightning import Callback, LightningModule, Trainer
 from scipy.special import logsumexp
 
 from hcp.forecast_validation import TemporalSplit, neural_seed_streams
@@ -79,8 +81,16 @@ class NeuralCandidate(Protocol):
     scales, standardization, or training sampling weights.
     """
 
-    def train_epoch(self) -> None:
-        """Advance inner training exactly one epoch without checkpoint files."""
+    def fit_selection(
+        self,
+        split: TemporalSplit,
+        validation_seed: np.random.SeedSequence,
+        max_epochs: int,
+        patience: int,
+        *,
+        capture: "PhaseCapture | None" = None,
+    ) -> "CandidateTrainingResult":
+        """Train once, retaining the earliest strict improvement and patience stop."""
         ...
 
     def fourth_step_nll(
@@ -184,45 +194,21 @@ def select_neural(
     records = []
     expected_shape = None
     for index, candidate in enumerate(candidates):
-        best_nll, best_epoch, unimproved = np.inf, 0, 0
-        for epoch in range(1, max_epochs + 1):
-            candidate.train_epoch()
-            # Clone all state, including the spawn counter; scoring may spawn its
-            # own per-origin children without advancing the reserved stream.
-            validation_seed = np.random.SeedSequence(
-                **allocated["validation"][index].state
+        result = candidate.fit_selection(
+            split, allocated["validation"][index], max_epochs, patience
+        )
+        if expected_shape is None:
+            expected_shape = result.loss_shape
+        if result.loss_shape != expected_shape:
+            raise ValueError(
+                "fourth-step NLL shape must retain the same nodes and origins"
             )
-            losses = np.asarray(
-                candidate.fourth_step_nll(split, validation_seed), dtype=float
-            )
-            if losses.ndim != 2 or losses.shape[0] == 0 or losses.shape[1] != 9:
-                raise ValueError("fourth-step NLL shape must be [nodes, nine origins]")
-            if expected_shape is None:
-                expected_shape = losses.shape
-            if losses.shape != expected_shape:
-                raise ValueError(
-                    "fourth-step NLL shape must retain the same nodes and origins"
-                )
-            if not np.isfinite(losses).all():
-                raise ValueError("all candidate fourth-step NLL values must be finite")
-            # Equal node/origin weights; division first also avoids overflowing
-            # the sum when all individual finite NLL values are very large.
-            score = float(np.sum(losses / losses.size))
-            if not np.isfinite(score):
-                raise ValueError("mean candidate fourth-step NLL must be finite")
-            if score < best_nll:
-                best_nll, best_epoch, unimproved = score, epoch, 0
-                candidate.retain_best_state()
-            else:
-                unimproved += 1
-            if unimproved >= patience:
-                break
         records.append(
             {
                 "candidate": index,
-                "best_epoch": best_epoch,
-                "best_nll": best_nll,
-                "epochs_run": epoch,
+                "best_epoch": result.best_epoch,
+                "best_nll": result.best_nll,
+                "epochs_run": result.epochs_run,
             }
         )
     selected = min(range(len(records)), key=lambda index: records[index]["best_nll"])
@@ -231,3 +217,113 @@ def select_neural(
     return SelectionResult(
         selected, winner["best_epoch"], winner["best_nll"], pd.DataFrame(records)
     )
+
+
+@dataclass(frozen=True)
+class CandidateTrainingResult:
+    """One candidate's earliest best score and completed selection epoch count."""
+
+    best_epoch: int
+    best_nll: float
+    epochs_run: int
+    loss_shape: tuple[int, int]
+
+
+PhaseCapture = Callable[[str], AbstractContextManager[None]]
+
+
+class CandidateSelection:
+    """Keep the original fourth-step objective, seed reset, and stopping policy."""
+
+    def __init__(
+        self,
+        candidate: NeuralCandidate,
+        split: TemporalSplit,
+        seed: np.random.SeedSequence,
+        patience: int,
+        capture: PhaseCapture | None = None,
+    ) -> None:
+        self.candidate, self.split, self.seed = candidate, split, seed
+        self.patience, self.capture = patience, capture or (lambda phase: nullcontext())
+        self.best_nll, self.best_epoch, self.epochs_run = np.inf, 0, 0
+        self.unimproved, self.loss_shape = 0, (0, 0)
+
+    def record_epoch(self) -> bool:
+        """Score a completed epoch and return whether patience was exhausted."""
+        self.epochs_run += 1
+        with self.capture("validation"):
+            losses = np.asarray(
+                self.candidate.fourth_step_nll(
+                    self.split, np.random.SeedSequence(**self.seed.state)
+                ),
+                dtype=float,
+            )
+        if losses.ndim != 2 or losses.shape[0] == 0 or losses.shape[1] != 9:
+            raise ValueError("fourth-step NLL shape must be [nodes, nine origins]")
+        if self.epochs_run == 1:
+            self.loss_shape = losses.shape
+        if losses.shape != self.loss_shape:
+            raise ValueError(
+                "fourth-step NLL shape must retain the same nodes and origins"
+            )
+        if not np.isfinite(losses).all():
+            raise ValueError("all candidate fourth-step NLL values must be finite")
+        score = float(np.sum(losses / losses.size))
+        if not np.isfinite(score):
+            raise ValueError("mean candidate fourth-step NLL must be finite")
+        if score < self.best_nll:
+            self.best_nll, self.best_epoch, self.unimproved = score, self.epochs_run, 0
+            with self.capture("retention"):
+                self.candidate.retain_best_state()
+        else:
+            self.unimproved += 1
+        return self.unimproved >= self.patience
+
+    def result(self) -> CandidateTrainingResult:
+        """Return the independently owned numeric summary after training."""
+        return CandidateTrainingResult(
+            self.best_epoch, self.best_nll, self.epochs_run, self.loss_shape
+        )
+
+
+class NeuralEpochCallback(Callback):
+    """Validate and stop inside one fit, restoring the active training context."""
+
+    def __init__(
+        self,
+        candidate: NeuralCandidate,
+        max_epochs: int,
+        selection: CandidateSelection | None = None,
+    ) -> None:
+        self.candidate, self.max_epochs, self.selection = (
+            candidate,
+            max_epochs,
+            selection,
+        )
+
+    def on_train_epoch_end(self, trainer: Trainer, pl_module: LightningModule) -> None:
+        """Check training, score the epoch, and restore state after nested prediction."""
+        self.candidate._finish_epoch(trainer, pl_module)
+        if self.selection is not None:
+            trainer.should_stop = self.selection.record_epoch()
+        self.candidate._resume_training(
+            trainer,
+            pl_module,
+            trainer.current_epoch + 1 < self.max_epochs and not trainer.should_stop,
+        )
+
+
+def fit_candidate_selection(
+    candidate: NeuralCandidate,
+    split: TemporalSplit,
+    seed: np.random.SeedSequence,
+    max_epochs: int,
+    patience: int,
+    capture: PhaseCapture | None = None,
+) -> CandidateTrainingResult:
+    """Run one architecture lifecycle with phase-specific warning collection."""
+    phases = capture or (lambda phase: nullcontext())
+    selection = CandidateSelection(candidate, split, seed, patience, phases)
+    with phases("training"):
+        candidate._fit_epochs(max_epochs, selection)
+    return selection.result()

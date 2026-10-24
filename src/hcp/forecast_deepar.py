@@ -20,7 +20,14 @@ from hcp.forecast_deepar_data import (
     weighted_window_sampler,
 )
 from hcp.forecast_deepar_rollout import recurrent_rollout
-from hcp.forecast_neural_validation import gaussian_mixture_nll, select_neural
+from hcp.forecast_neural_validation import (
+    CandidateTrainingResult,
+    NeuralEpochCallback,
+    PhaseCapture,
+    fit_candidate_selection,
+    gaussian_mixture_nll,
+    select_neural,
+)
 from hcp.forecast_types import NativePrediction, PreparedHistory, V2ModelSettings
 from hcp.forecast_validation import (
     TemporalSplit,
@@ -28,7 +35,7 @@ from hcp.forecast_validation import (
     neural_split,
     prepare_prefix,
 )
-from hcp.forecast_warnings import ForecastWarnings, WarningCandidate
+from hcp.forecast_warnings import ForecastWarnings, WarningCandidate, quiet_neural_logs
 
 
 class EnhancedRNNModule(CustomRNNModule):
@@ -135,34 +142,58 @@ class EnhancedCandidate:
         )
         self.epochs_trained = 0
 
-    def train_epoch(self) -> None:
-        """Train one further epoch; preserve weights, Adam moments, and sampler RNG."""
-        self.module.train()
-        trainer = Trainer(
-            accelerator="gpu" if self.execution.device == "cuda:0" else "cpu",
-            devices=[0] if self.execution.device == "cuda:0" else 1,
-            precision=self.execution.precision,
-            max_epochs=1,
-            deterministic=True,
-            logger=False,
-            enable_checkpointing=False,
-            enable_progress_bar=False,
-            enable_model_summary=False,
-            num_sanity_val_steps=0,
+    def fit_selection(
+        self,
+        split: TemporalSplit,
+        validation_seed: np.random.SeedSequence,
+        max_epochs: int,
+        patience: int,
+        *,
+        capture: PhaseCapture | None = None,
+    ) -> CandidateTrainingResult:
+        """Train the inner candidate in one Trainer/fit lifecycle."""
+        return fit_candidate_selection(
+            self, split, validation_seed, max_epochs, patience, capture
         )
-        trainer.fit(self.module, train_dataloaders=self.loader)
-        # Lightning teardown returns weights to CPU; validation keeps the device contract.
+
+    def train_epoch(self) -> None:
+        """Advance one epoch for characterization callers."""
+        self._fit_epochs(1)
+
+    def _fit_epochs(self, epochs, selection=None):
+        self.module.train()
+        with quiet_neural_logs():
+            trainer = Trainer(
+                accelerator="gpu" if self.execution.device == "cuda:0" else "cpu",
+                devices=[0] if self.execution.device == "cuda:0" else 1,
+                precision=self.execution.precision,
+                max_epochs=epochs,
+                deterministic=True,
+                logger=False,
+                enable_checkpointing=False,
+                enable_progress_bar=False,
+                enable_model_summary=False,
+                num_sanity_val_steps=0,
+                callbacks=[NeuralEpochCallback(self, epochs, selection)],
+            )
+            trainer.fit(self.module, train_dataloaders=self.loader)
         self.module.to(self.execution.device)
+
+    def _finish_epoch(self, trainer, module):
         loss = trainer.callback_metrics.get("train_loss")
         if (
             loss is None
             or not torch.isfinite(loss).all()
-            or any(not torch.isfinite(p).all() for p in self.module.parameters())
+            or any(not torch.isfinite(p).all() for p in module.parameters())
         ):
             raise ValueError(
                 "enhanced recurrent training produced a nonfinite loss or weight"
             )
         self.epochs_trained += 1
+
+    def _resume_training(self, trainer, module, another_epoch):
+        module._trainer = trainer
+        module.train()
 
     def retain_best_state(self) -> None:
         """Copy current weights into separately owned in-memory CPU tensors."""
@@ -204,8 +235,7 @@ class EnhancedCandidate:
             raise ValueError("full refit requires a positive integer epoch count")
         cutoff = self.histories[0].dates[-1] + np.timedelta64(2, "D")
         self._build(cutoff, seed)
-        for _ in range(epochs):
-            self.train_epoch()
+        self._fit_epochs(epochs)
 
     def predict_samples(self, seed: np.random.SeedSequence) -> np.ndarray:
         """Return finite original-unit paths with shape [nodes, four, n_samples]."""

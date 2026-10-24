@@ -7,11 +7,18 @@ import pandas as pd
 import torch
 from darts import TimeSeries
 from darts.models import RNNModel, TransformerModel
-from darts.models.forecasting.transformer_model import _TransformerModule
 from darts.utils.likelihood_models import GaussianLikelihood
+from darts.utils.utils import MAX_TORCH_SEED_VALUE
 
+from hcp import forecast_transformer_module
 from hcp.benchmark_batch import NeuralExecution
-from hcp.forecast_neural_validation import select_neural
+from hcp.forecast_neural_validation import (
+    CandidateTrainingResult,
+    NeuralEpochCallback,
+    PhaseCapture,
+    fit_candidate_selection,
+    select_neural,
+)
 from hcp.forecast_types import (
     ForecastSettings,
     NativePrediction,
@@ -24,9 +31,11 @@ from hcp.forecast_validation import (
     neural_split,
     prepare_prefix,
 )
-from hcp.forecast_warnings import ForecastWarnings, WarningCandidate
+from hcp.forecast_warnings import ForecastWarnings, WarningCandidate, quiet_neural_logs
 
 _DARTS_TRANSFORMER = TransformerModel
+_PersistentTransformer = forecast_transformer_module._PersistentTransformer
+_PersistentTransformerModule = forecast_transformer_module._PersistentTransformerModule
 
 
 def _seed_int(seed: np.random.SeedSequence) -> int:
@@ -100,40 +109,6 @@ def deepar_samples(
         return result
 
 
-class _PersistentTransformerModule(_TransformerModule):
-    """Darts Transformer module that retains one Adam state over epoch calls."""
-
-    def configure_optimizers(self):
-        if not hasattr(self, "_persistent_optimizer"):
-            self._persistent_optimizer = super().configure_optimizers()
-        return self._persistent_optimizer
-
-
-class _PersistentTransformer(TransformerModel):
-    """Darts Transformer with the same model and a stateful Adam factory."""
-
-    def _create_model(self, train_sample):
-        module = super()._create_model(train_sample)
-        persistent = _PersistentTransformerModule(
-            input_size=module.input_size,
-            output_size=module.target_size,
-            nr_params=module.nr_params,
-            d_model=self.d_model,
-            nhead=self.nhead,
-            num_encoder_layers=self.num_encoder_layers,
-            num_decoder_layers=self.num_decoder_layers,
-            dim_feedforward=self.dim_feedforward,
-            dropout=self.dropout,
-            activation=self.activation,
-            norm_type=self.norm_type,
-            custom_encoder=self.custom_encoder,
-            custom_decoder=self.custom_decoder,
-            **self.pl_module_params,
-        )
-        persistent.load_state_dict(module.state_dict())
-        return persistent
-
-
 class TransformerCandidate:
     """Stateful direct-Gaussian candidate with causal prefixes and owned best weights."""
 
@@ -196,24 +171,60 @@ class TransformerCandidate:
             )
         self.epochs_trained = 0
 
-    def train_epoch(self) -> None:
-        self.model.fit(
-            self.series,
-            epochs=1,
-            verbose=False,
-            dataloader_kwargs={"num_workers": 0, "pin_memory": False},
+    def fit_selection(
+        self,
+        split: TemporalSplit,
+        validation_seed: np.random.SeedSequence,
+        max_epochs: int,
+        patience: int,
+        *,
+        capture: PhaseCapture | None = None,
+    ) -> CandidateTrainingResult:
+        """Train the inner candidate once, validating at each completed epoch."""
+        return fit_candidate_selection(
+            self, split, validation_seed, max_epochs, patience, capture
         )
-        trainer = getattr(self.model, "trainer", None)
-        if trainer is None:
-            trainer = getattr(self.model.model, "trainer", None)
-        loss = None if trainer is None else trainer.callback_metrics.get("train_loss")
+
+    def train_epoch(self) -> None:
+        """Advance one epoch for characterization callers."""
+        self._fit_epochs(1)
+
+    def _fit_epochs(self, epochs, selection=None):
+        callback = NeuralEpochCallback(self, epochs, selection)
+        self.model.trainer_params["callbacks"] = [callback]
+        with quiet_neural_logs():
+            self.model.fit(
+                self.series,
+                epochs=epochs,
+                verbose=False,
+                dataloader_kwargs={"num_workers": 0, "pin_memory": False},
+            )
+
+    def _finish_epoch(self, trainer, module):
+        # Darts normally assigns model only after fit returns. Nested scoring needs it now.
+        self.model.model = module
+        loss = trainer.callback_metrics.get("train_loss")
         if (
             loss is None
             or not torch.isfinite(loss).all()
-            or any(not torch.isfinite(p).all() for p in self.model.model.parameters())
+            or any(not torch.isfinite(p).all() for p in module.parameters())
         ):
             raise ValueError("Transformer training produced nonfinite loss or weights")
         self.epochs_trained += 1
+
+    def _resume_training(self, trainer, module, another_epoch):
+        self.model.trainer = trainer
+        module._trainer = trainer
+        # Nested Darts prediction teardown moves the shared module back to CPU.
+        module.to(self.execution.device)
+        module.train()
+        if another_epoch:
+            # Each former fit() entered two @random_method contexts. Keep exactly
+            # their existing RandomState draws, without allocating new seed children.
+            self.model._random_instance.randint(0, high=MAX_TORCH_SEED_VALUE)
+            torch.manual_seed(
+                self.model._random_instance.randint(0, high=MAX_TORCH_SEED_VALUE)
+            )
 
     def retain_best_state(self) -> None:
         self.best_state = {
@@ -262,8 +273,7 @@ class TransformerCandidate:
         if isinstance(epochs, bool) or not isinstance(epochs, int) or epochs < 1:
             raise ValueError("full refit requires a positive integer epoch count")
         self._build(self.histories[0].dates[-1] + np.timedelta64(2, "D"), seed)
-        for _ in range(epochs):
-            self.train_epoch()
+        self._fit_epochs(epochs)
 
 
 def transformer_prediction(

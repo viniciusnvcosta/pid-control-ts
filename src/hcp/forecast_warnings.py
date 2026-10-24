@@ -2,6 +2,7 @@
 # ABOUTME: Keeps completed and failing phase evidence without changing exception identity.
 """Scoped in-memory warning provenance for neural forecast adapters."""
 
+import logging
 import warnings
 from collections import Counter
 from collections.abc import Iterator
@@ -9,7 +10,7 @@ from contextlib import contextmanager
 
 import numpy as np
 
-from hcp.forecast_neural_validation import NeuralCandidate
+from hcp.forecast_neural_validation import CandidateTrainingResult, NeuralCandidate
 from hcp.forecast_types import _frozen_diagnostics
 from hcp.forecast_validation import TemporalSplit
 
@@ -94,10 +95,21 @@ class WarningCandidate:
     ):
         self.candidate, self.width, self.collector = candidate, width, collector
 
-    def train_epoch(self) -> None:
-        """Capture warnings from one inner training epoch."""
-        with self.collector.capture(self.width, "training"):
-            self.candidate.train_epoch()
+    def fit_selection(
+        self,
+        split: TemporalSplit,
+        validation_seed: np.random.SeedSequence,
+        max_epochs: int,
+        patience: int,
+    ) -> CandidateTrainingResult:
+        """Capture training separately from nested validation and retention phases."""
+        return self.candidate.fit_selection(
+            split,
+            validation_seed,
+            max_epochs,
+            patience,
+            capture=lambda phase: self.collector.capture(self.width, phase),
+        )
 
     def fourth_step_nll(
         self, split: TemporalSplit, seed: np.random.SeedSequence
@@ -115,3 +127,23 @@ class WarningCandidate:
         """Capture all selected full-prefix refit warnings under the refit phase."""
         with self.collector.capture(self.width, "refit"):
             self.candidate.fit_full(epochs, seed)
+
+
+@contextmanager
+def quiet_neural_logs() -> Iterator[None]:
+    """Suppress scoped Lightning INFO startup logs while retaining Python warnings."""
+    prefix = "pytorch_lightning"
+    names = [prefix] + [
+        name
+        for name in logging.root.manager.loggerDict
+        if name.startswith(prefix + ".")
+    ]
+    loggers = [logging.getLogger(name) for name in names]
+    levels = [logger.level for logger in loggers]
+    try:
+        for logger in loggers:
+            logger.setLevel(max(logger.level, logging.WARNING))
+        yield
+    finally:
+        for logger, level in zip(loggers, levels, strict=True):
+            logger.setLevel(level)

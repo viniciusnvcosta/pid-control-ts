@@ -63,6 +63,22 @@ class Candidate:
         self.refit = None
         self.rng = np.random.default_rng(training_seed)
 
+    def fit_selection(
+        self, split, validation_seed, max_epochs, patience, *, capture=None
+    ):
+        from contextlib import nullcontext
+
+        from hcp.forecast_neural_validation import CandidateSelection
+
+        phases = capture or (lambda phase: nullcontext())
+        selection = CandidateSelection(self, split, validation_seed, patience, phases)
+        for _ in range(max_epochs):
+            with phases("training"):
+                self.train_epoch()
+            if selection.record_epoch():
+                break
+        return selection.result()
+
     def train_epoch(self):
         self.epoch += 1
         self.weights[:] = self.epoch
