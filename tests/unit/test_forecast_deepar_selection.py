@@ -45,6 +45,22 @@ class TrainingBoundary:
         for _ in range(2):
             warnings.warn(f"{phase} evidence", UserWarning)
 
+    def fit_selection(
+        self, split, validation_seed, max_epochs, patience, *, capture=None
+    ):
+        from contextlib import nullcontext
+
+        from hcp.forecast_neural_validation import CandidateSelection
+
+        phases = capture or (lambda phase: nullcontext())
+        selection = CandidateSelection(self, split, validation_seed, patience, phases)
+        for _ in range(max_epochs):
+            with phases("training"):
+                self.train_epoch()
+            if selection.record_epoch():
+                break
+        return selection.result()
+
     def train_epoch(self):
         self.epochs_trained += 1
         self.events.append(("train", self.width, self.epochs_trained))
@@ -278,3 +294,85 @@ def test_prediction_mode_cannot_change_another_candidates_loss_modules():
     later = adapter.EnhancedRNNModule(n_nodes=2, hidden_dim=40)
     assert later.criterion.training
     assert later.train_criterion.training and later.val_criterion.training
+
+
+def test_enhanced_selection_and_refit_each_use_one_trainer(monkeypatch):
+    import torch
+
+    constructions, fits = [], []
+
+    class Trainer:
+        def __init__(self, **kwargs):
+            constructions.append(kwargs)
+            self.callback_metrics = {"train_loss": torch.tensor(1.0)}
+            self.should_stop = False
+
+        def fit(self, module, *, train_dataloaders):
+            fits.append(module)
+            for epoch in range(constructions[-1]["max_epochs"]):
+                self.current_epoch = epoch
+                for callback in constructions[-1].get("callbacks", []):
+                    callback.on_train_epoch_end(self, module)
+                if self.should_stop:
+                    break
+
+    monkeypatch.setattr(adapter, "Trainer", Trainer)
+    c = adapter.EnhancedCandidate(
+        histories(),
+        V2ModelSettings(),
+        40,
+        np.random.SeedSequence(82),
+        NeuralExecution.cpu(),
+    )
+    monkeypatch.setattr(
+        c,
+        "fourth_step_nll",
+        lambda split, seed: np.full(
+            (2, 9), [3.0, 2.0, 2.0][min(c.epochs_trained - 1, 2)]
+        ),
+    )
+    from hcp.forecast_neural_validation import select_neural
+
+    result = select_neural(
+        (c,),
+        adapter._enhanced_split(histories()),
+        np.random.SeedSequence(1),
+        max_epochs=100,
+    )
+    assert result.best_epoch == 2
+    assert result.tuning.iloc[0]["epochs_run"] == 12
+    assert len(constructions) == len(fits) == 2
+    assert [row["max_epochs"] for row in constructions] == [100, 2]
+    assert fits[0] is not fits[1]
+
+
+def test_enhanced_cuda_trainer_kwargs_are_explicit(monkeypatch):
+    import torch
+
+    captured = []
+
+    class Trainer:
+        def __init__(self, **kwargs):
+            captured.append(kwargs)
+            self.callback_metrics = {"train_loss": torch.tensor(1.0)}
+
+        def fit(self, module, *, train_dataloaders):
+            pass
+
+    monkeypatch.setattr(adapter, "Trainer", Trainer)
+    c = adapter.EnhancedCandidate(
+        histories(),
+        V2ModelSettings(),
+        40,
+        np.random.SeedSequence(82),
+        NeuralExecution.cpu(),
+    )
+    c.execution = NeuralExecution(
+        "cuda:0", "NVIDIA GeForce RTX 4080", ":4096:8", False, "32-true"
+    )
+    monkeypatch.setattr(c.module, "to", lambda device: c.module)
+    c.train_epoch()
+    assert captured[0]["accelerator"] == "gpu"
+    assert captured[0]["devices"] == [0]
+    assert captured[0]["precision"] == "32-true"
+    assert captured[0]["deterministic"] is True

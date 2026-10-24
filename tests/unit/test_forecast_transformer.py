@@ -44,6 +44,8 @@ class Backend:
         self.kwargs = kwargs
         self.model = torch.nn.Linear(1, 1)
         self.fits, self.predictions = [], []
+        self.trainer_params = kwargs["pl_trainer_kwargs"]
+        self._random_instance = np.random.RandomState(0)
         self.trainer = type(
             "Trainer", (), {"callback_metrics": {"train_loss": torch.tensor(1.0)}}
         )()
@@ -51,9 +53,16 @@ class Backend:
 
     def fit(self, series, **kwargs):
         self.fits.append((series, kwargs))
-        with torch.no_grad():
-            self.model.weight.add_(1)
-        warnings.warn("synthetic fit warning", UserWarning)
+        self.trainer.should_stop = False
+        for epoch in range(kwargs["epochs"]):
+            self.trainer.current_epoch = epoch
+            with torch.no_grad():
+                self.model.weight.add_(1)
+            warnings.warn("synthetic fit warning", UserWarning)
+            for callback in self.trainer_params.get("callbacks", []):
+                callback.on_train_epoch_end(self.trainer, self.model)
+            if self.trainer.should_stop:
+                break
         return self
 
     def predict(
@@ -120,12 +129,15 @@ def test_registered_constructor_scaling_selection_refit_and_streams(backend):
         )
         assert model.kwargs.get("add_encoders") is None
         for _, kwargs in model.fits:
-            assert kwargs["epochs"] == 1 and "val_series" not in kwargs
+            assert (
+                kwargs["epochs"] == (5 if model is inner else 1)
+                and "val_series" not in kwargs
+            )
             assert kwargs["dataloader_kwargs"]["pin_memory"] is False
             assert kwargs["dataloader_kwargs"]["num_workers"] == 0
         for _, _, _, kwargs in model.predictions:
             assert kwargs["mc_dropout"] is False
-    assert len(inner.fits) == 2 and len(full.fits) == 1
+    assert len(inner.fits) == len(full.fits) == 1
     np.testing.assert_allclose(inner.fits[0][0][0].values()[:, 0], np.arange(28) / 13.5)
     np.testing.assert_allclose(full.fits[0][0][0].values()[:, 0], np.arange(40) / 19.5)
     assert prediction.nodes == ("0", "1") and prediction.samples.shape == (2, 4, 5)
@@ -226,3 +238,14 @@ def test_cuda_trainer_contract():
     assert trainer["devices"] == [0]
     assert trainer["precision"] == "32-true"
     assert trainer["deterministic"] is True
+
+
+def test_transformer_selection_uses_one_fit_lifecycle(backend):
+    settings = replace(
+        V2ModelSettings(), n_samples=5, neural_max_epochs=5, neural_patience=1
+    )
+    backend.transformer_prediction(
+        histories(), settings, np.random.SeedSequence(71), NeuralExecution.cpu()
+    )
+    inner, full = Backend.instances
+    assert len(inner.fits) == len(full.fits) == 1

@@ -183,3 +183,135 @@ def test_real_cuda_transformer_repeatability_and_evidence(monkeypatch):
         for key in a:
             np.testing.assert_array_equal(a[key], b[key])
     assert devices and set(devices) == {"cuda:0"}
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda:0"])
+def test_one_lifecycle_matches_three_epoch_cpu_characterization_and_refit(
+    monkeypatch, caplog, device
+):
+    import copy
+    import hashlib
+    import logging
+
+    from pytorch_lightning import Trainer
+
+    neural = _module()
+    if device == "cuda:0" and not torch.cuda.is_available():
+        pytest.skip("CUDA unavailable")
+    execution = (
+        NeuralExecution.cpu()
+        if device == "cpu"
+        else NeuralExecution(
+            "cuda:0", "NVIDIA GeForce RTX 4080", ":4096:8", False, "32-true"
+        )
+    )
+    if device == "cuda:0":
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
+    settings = replace(V2ModelSettings(), n_samples=8)
+    fits = []
+    original_fit = Trainer.fit
+
+    def record_fit(trainer, *args, **kwargs):
+        fits.append(trainer)
+        return original_fit(trainer, *args, **kwargs)
+
+    monkeypatch.setattr(Trainer, "fit", record_fit)
+
+    def build():
+        return neural.TransformerCandidate(
+            _histories(), settings, np.random.SeedSequence(82), execution
+        )
+
+    baseline = build()
+    split = baseline.split
+    losses, states, optimizers = [], [], []
+    for _ in range(3):
+        baseline.train_epoch()
+        losses.append(baseline.fourth_step_nll(split, np.random.SeedSequence(83)))
+        states.append(copy.deepcopy(baseline.model.model.state_dict()))
+        optimizers.append(
+            copy.deepcopy(baseline.model.model.configure_optimizers().state_dict())
+        )
+    if device == "cpu":
+        # Frozen hashes captured directly from da54c5f before the lifecycle edits.
+        assert [
+            hashlib.sha256(
+                b"".join(state[k].cpu().numpy().tobytes() for k in sorted(state))
+            ).hexdigest()
+            for state in states
+        ] == [
+            "c9d309bde9fd36767e4db016657066d5f1e4204af9d36feba23abb3d02d7a1d8",
+            "41e0053e19c5fdb2c7faa98956a104299f0e90974abaffcde1bee20053fe3f13",
+            "a4fff15b2d926624131509109c3cf059f601e5e7d6d2be205abf488ff82f91b0",
+        ]
+        assert [float(np.mean(x)) for x in losses] == [
+            6.777089701471386,
+            5.089570571643926,
+            4.566897099806251,
+        ]
+
+    candidate = build()
+    original_score = candidate.fourth_step_nll
+    observed, optimizer_ids = [], []
+
+    def score(split, seed):
+        index = len(observed)
+        actual = original_score(split, seed)
+        np.testing.assert_array_equal(actual, losses[index])
+        torch.testing.assert_close(
+            candidate.model.model.state_dict(), states[index], rtol=0, atol=0
+        )
+        optimizer = candidate.model.model.configure_optimizers()
+        optimizer_ids.append(id(optimizer))
+        torch.testing.assert_close(
+            optimizer.state_dict(),
+            optimizers[index],
+            rtol=0,
+            atol=0,
+            check_device=False,
+        )
+        observed.append(actual)
+        return actual
+
+    monkeypatch.setattr(candidate, "fourth_step_nll", score)
+    caplog.clear()
+    start = len(fits)
+    with caplog.at_level(logging.INFO):
+        result = candidate.fit_selection(split, np.random.SeedSequence(83), 3, 3)
+    assert result.best_epoch == result.epochs_run == 3
+    assert len(fits) - start == 1 and len(set(optimizer_ids)) == 1
+    assert len(observed) == 3
+    torch.testing.assert_close(
+        candidate.best_state, states[-1], rtol=0, atol=0, check_device=False
+    )
+    # Startup output must stay bounded even though fourth-step prediction runs each epoch.
+    assert sum("GPU available:" in record.message for record in caplog.records) <= 2
+
+    baseline._build(
+        baseline.histories[0].dates[-1] + np.timedelta64(2, "D"),
+        np.random.SeedSequence(84),
+    )
+    for _ in range(3):
+        baseline.train_epoch()
+    start = len(fits)
+    candidate.fit_full(3, np.random.SeedSequence(84))
+    assert len(fits) - start == 1
+    torch.testing.assert_close(
+        candidate.model.model.state_dict(),
+        baseline.model.model.state_dict(),
+        rtol=0,
+        atol=0,
+    )
+    for model in (baseline, candidate):
+        model._samples = model.model.predict(
+            4,
+            series=model.series,
+            num_samples=8,
+            mc_dropout=False,
+            verbose=False,
+            dataloader_kwargs={"num_workers": 0, "pin_memory": False},
+            random_state=85,
+        )
+    for a, b in zip(baseline._samples, candidate._samples, strict=True):
+        np.testing.assert_array_equal(a.all_values(), b.all_values())

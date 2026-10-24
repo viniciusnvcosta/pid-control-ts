@@ -134,3 +134,125 @@ def test_real_cuda_enhanced_repeatability_and_evidence(monkeypatch):
             else:
                 np.testing.assert_array_equal(a[key], b[key])
     assert devices and set(devices) == {"cuda:0"}
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda:0"])
+def test_one_lifecycle_preserves_cpu_epoch_weights_adam_sampler_and_full_refit(
+    monkeypatch, device
+):
+    import copy
+    import hashlib
+
+    import torch
+    from pytorch_lightning import Trainer
+
+    from hcp.forecast_deepar import EnhancedCandidate, _enhanced_split
+
+    if device == "cuda:0" and not torch.cuda.is_available():
+        pytest.skip("CUDA unavailable")
+    execution = (
+        NeuralExecution.cpu()
+        if device == "cpu"
+        else NeuralExecution(
+            "cuda:0", "NVIDIA GeForce RTX 4080", ":4096:8", False, "32-true"
+        )
+    )
+    if device == "cuda:0":
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
+    settings = replace(V2ModelSettings(), n_samples=8)
+
+    def build():
+        return EnhancedCandidate(
+            _available_histories()[:2],
+            settings,
+            40,
+            np.random.SeedSequence(82),
+            execution,
+        )
+
+    baseline = build()
+    split = _enhanced_split(baseline.histories)
+    losses, states, optimizers, samplers = [], [], [], []
+    for _ in range(3):
+        baseline.train_epoch()
+        losses.append(baseline.fourth_step_nll(split, np.random.SeedSequence(83)))
+        states.append(copy.deepcopy(baseline.module.state_dict()))
+        optimizers.append(
+            copy.deepcopy(baseline.module.configure_optimizers().state_dict())
+        )
+        samplers.append(baseline.loader.sampler.generator.get_state().clone())
+    if device == "cpu":
+        # Frozen hashes captured directly from da54c5f before the lifecycle edits.
+        assert [
+            hashlib.sha256(
+                b"".join(state[k].cpu().numpy().tobytes() for k in sorted(state))
+            ).hexdigest()
+            for state in states
+        ] == [
+            "772d6c8016ecef34c7099d7054aff146ada4828b5adbcb75a9b324c5e2788d2f",
+            "e67a81ea5a9a001b3142d68ba5e6fd3575afa3bb275a5c5491b7b8ceeaaa5aff",
+            "bee9fd55a93db8e59ad53b2fea8a05b6b486af3b7825aa59041074c9024c9e26",
+        ]
+        assert [float(np.mean(x)) for x in losses] == [
+            10.01195852606616,
+            9.815003573747745,
+            9.622106724686086,
+        ]
+    candidate = build()
+    original_score = candidate.fourth_step_nll
+    observed, optimizer_ids = [], []
+
+    def score(split, seed):
+        index = len(observed)
+        actual = original_score(split, seed)
+        np.testing.assert_array_equal(actual, losses[index])
+        torch.testing.assert_close(
+            candidate.module.state_dict(), states[index], rtol=0, atol=0
+        )
+        optimizer = candidate.module.configure_optimizers()
+        optimizer_ids.append(id(optimizer))
+        torch.testing.assert_close(
+            optimizer.state_dict(),
+            optimizers[index],
+            rtol=0,
+            atol=0,
+            check_device=False,
+        )
+        assert torch.equal(
+            candidate.loader.sampler.generator.get_state(), samplers[index]
+        )
+        observed.append(actual)
+        return actual
+
+    monkeypatch.setattr(candidate, "fourth_step_nll", score)
+    fits = []
+    original_fit = Trainer.fit
+
+    def record_fit(trainer, *args, **kwargs):
+        fits.append(trainer)
+        return original_fit(trainer, *args, **kwargs)
+
+    monkeypatch.setattr(Trainer, "fit", record_fit)
+    result = candidate.fit_selection(split, np.random.SeedSequence(83), 3, 3)
+    assert result.best_epoch == result.epochs_run == 3
+    assert len(fits) == 1 and len(set(optimizer_ids)) == 1
+    torch.testing.assert_close(
+        candidate.best_state, states[-1], rtol=0, atol=0, check_device=False
+    )
+    baseline._build(
+        baseline.histories[0].dates[-1] + np.timedelta64(2, "D"),
+        np.random.SeedSequence(84),
+    )
+    for _ in range(3):
+        baseline.train_epoch()
+    start = len(fits)
+    candidate.fit_full(3, np.random.SeedSequence(84))
+    assert len(fits) - start == 1
+    torch.testing.assert_close(
+        candidate.module.state_dict(), baseline.module.state_dict(), rtol=0, atol=0
+    )
+    np.testing.assert_array_equal(
+        candidate.predict_samples(np.random.SeedSequence(85)),
+        baseline.predict_samples(np.random.SeedSequence(85)),
+    )
