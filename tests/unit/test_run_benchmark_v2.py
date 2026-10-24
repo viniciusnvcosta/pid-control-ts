@@ -861,3 +861,194 @@ def test_runtime_reader_rejects_invalid_incomplete_object_prefixes(tmp_path, fra
     (tmp_path / "runtime.jsonl").write_bytes(fragment)
     with pytest.raises(ValueError):
         run_module._read_runtime_events(tmp_path)
+
+
+def _resume_fixture(monkeypatch):
+    import warnings
+
+    import numpy as np
+
+    from hcp.benchmark_batch import ExecutionIdentity
+    from hcp.benchmark_data import ActualPanel
+    from hcp.forecast import FORECASTERS, ForecastConfig, plan_model_forecasts
+
+    calls = []
+
+    def adapter(histories, settings, seed, execution):
+        calls.append(seed.spawn_key)
+        warnings.warn("scientific evidence", UserWarning)
+        return np.random.default_rng(seed).normal(size=(2, 4, settings.n_samples))
+
+    monkeypatch.setitem(FORECASTERS, "deepar", adapter)
+    cfg = ForecastConfig(models=("deepar",), root_seed=17)
+    dates = pd.date_range("2020-01-04", periods=70, freq="7D").to_numpy()
+    actuals = ActualPanel(dates, ("us", "aa"), np.ones((2, 70)), np.ones((2, 70), bool))
+    plan = plan_model_forecasts(
+        actuals, dates[64:68], dates[64:68] - np.timedelta64(26, "D"), cfg
+    )
+    identity = ExecutionIdentity(
+        "benchmark-v2",
+        "fixture",
+        "abc",
+        "a" * 64,
+        "b" * 64,
+        "c" * 64,
+        17,
+        cfg.models,
+        tuple(str(plan.origins[i]) for _, i in plan.eligible_keys),
+        cfg.quantiles,
+        1,
+        "3.11",
+        {"numpy": "fixture"},
+        {
+            "gpu_uuid": "GPU-test",
+            "gpu_name": "RTX4080",
+            "compute_capability": [8, 9],
+            "driver_version": "570",
+            "cuda_version": "12.8",
+            "device": "cuda:0",
+            "device_index": 0,
+            "torch_version": "2.8",
+            "deterministic_algorithms": True,
+            "matmul_allow_tf32": False,
+            "cudnn_allow_tf32": False,
+            "float32_matmul_precision": "highest",
+            "cublas_workspace_config": ":4096:8",
+        },
+    )
+    return cfg, plan, identity, calls
+
+
+def test_resume_executes_only_missing_batches_and_preserves_science(
+    tmp_path, monkeypatch, capsys, caplog
+):
+    import logging
+
+    from hcp.forecast import FORECASTERS
+
+    cfg, plan, identity, calls = _resume_fixture(monkeypatch)
+    execute = getattr(run_module, "_generate_or_resume_v2", None)
+    assert execute is not None, "resumable orchestration is absent"
+    workdir = tmp_path / ".fixture.partial"
+    adapter = FORECASTERS["deepar"]
+    logger = logging.getLogger("pytorch_lightning.utilities.rank_zero")
+    monkeypatch.setattr(logger, "level", logging.INFO)
+
+    def interrupted(*args):
+        logger.info("GPU available banner and tip")
+        if len(calls) == 2:
+            raise RuntimeError("interrupt")
+        return adapter(*args)
+
+    monkeypatch.setitem(FORECASTERS, "deepar", interrupted)
+    with pytest.raises(RuntimeError, match="interrupt"):
+        execute(plan, cfg, identity, workdir)
+    assert len(list(workdir.glob("batches/*/*.batch"))) == 2
+    assert logger.level == logging.INFO
+    monkeypatch.setitem(FORECASTERS, "deepar", adapter)
+    calls.clear()
+    resumed, summary = execute(plan, cfg, identity, workdir)
+    assert calls == [(0, 0, 2), (0, 0, 3)]
+    assert (
+        summary.resumed_batches,
+        summary.generated_batches,
+        summary.total_batches,
+    ) == (2, 2, 4)
+    complete, _ = execute(plan, cfg, identity, tmp_path / "fresh")
+    pd.testing.assert_frame_equal(resumed.base_forecasts, complete.base_forecasts)
+    for name in ("forecast_diagnostics", "tuning", "quantile_repairs", "warnings"):
+        pd.testing.assert_frame_equal(
+            getattr(resumed.tables, name), getattr(complete.tables, name)
+        )
+    assert len(resumed.tables.warnings) == 4
+    assert resumed.diagnostics["models"]["deepar"]["warning_counts"] == {
+        "UserWarning": 4
+    }
+    events = run_module._read_runtime_events(workdir)
+    assert [event["event"] for event in events].count("error") == 1
+    assert [event["event"] for event in events].count("resume_skip") == 2
+    assert [event["event"] for event in events].count("batch_complete") == 4
+    assert events[0]["event"] == "model_start" and events[0]["eta_seconds"] is None
+    assert (
+        __import__("json").loads((workdir / "progress.json").read_text())["completed"]
+        == 4
+    )
+    assert "GPU available" not in capsys.readouterr().out
+    assert "GPU available" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "git_sha",
+        "config_sha256",
+        "lockfile_sha256",
+        "input_sha256",
+        "gpu_uuid",
+        "gpu_name",
+        "compute_capability",
+        "driver_version",
+        "cuda_version",
+        "device",
+        "device_index",
+        "torch_version",
+        "deterministic_algorithms",
+        "matmul_allow_tf32",
+        "cudnn_allow_tf32",
+        "float32_matmul_precision",
+        "cublas_workspace_config",
+    ],
+)
+def test_resume_identity_mismatch_precedes_batch_read_and_fit(
+    tmp_path, monkeypatch, field
+):
+    from dataclasses import replace
+
+    cfg, plan, identity, calls = _resume_fixture(monkeypatch)
+    execute = getattr(run_module, "_generate_or_resume_v2", None)
+    assert execute is not None, "resumable orchestration is absent"
+    run_module._initialize_batch_workdir(tmp_path / "work", identity)
+    if field in {"git_sha", "config_sha256", "lockfile_sha256", "input_sha256"}:
+        changed = replace(identity, **{field: "changed"})
+    else:
+        changed = replace(
+            identity,
+            runtime_provenance={**identity.runtime_provenance, field: "changed"},
+        )
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("batch read before identity validation")
+
+    monkeypatch.setattr(run_module, "_read_origin_batch", forbidden)
+    before = (tmp_path / "work" / "run-state.json").read_bytes()
+    with pytest.raises(ValueError, match="identity"):
+        execute(plan, cfg, changed, tmp_path / "work")
+    assert not calls
+    assert (tmp_path / "work" / "run-state.json").read_bytes() == before
+    assert not (tmp_path / "work" / "runtime.jsonl").exists()
+
+
+def test_resume_drops_only_verified_truncated_log_tail(tmp_path, monkeypatch):
+    cfg, plan, identity, _ = _resume_fixture(monkeypatch)
+    workdir = tmp_path / "work"
+    run_module._generate_or_resume_v2(plan, cfg, identity, workdir)
+    original = (workdir / "runtime.jsonl").read_bytes()
+    with (workdir / "runtime.jsonl").open("ab") as stream:
+        stream.write(b'{"event":"interru')
+    run_module._generate_or_resume_v2(plan, cfg, identity, workdir)
+    events = run_module._read_runtime_events(workdir)
+    assert len(events) == 10
+    assert (workdir / "runtime.jsonl").read_bytes().startswith(original)
+
+
+def test_resume_refuses_corrupted_batch_without_refit(tmp_path, monkeypatch):
+    cfg, plan, identity, calls = _resume_fixture(monkeypatch)
+    workdir = tmp_path / "work"
+    run_module._generate_or_resume_v2(plan, cfg, identity, workdir)
+    batch = next(workdir.glob("batches/*/*.batch/forecasts.parquet"))
+    batch.write_bytes(b"corrupt")
+    calls.clear()
+    with pytest.raises(ValueError, match="invalid origin batch"):
+        run_module._generate_or_resume_v2(plan, cfg, identity, workdir)
+    assert not calls
+    assert batch.read_bytes() == b"corrupt"

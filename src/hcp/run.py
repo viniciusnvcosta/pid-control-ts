@@ -19,19 +19,26 @@ import ctypes
 import errno
 import importlib.metadata
 import json
+import logging
 import os
 import platform
 import shutil
 import subprocess
+import time
 import uuid
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import statsmodels
 from matplotlib import pyplot as plt
+
+from core import methods
 
 # RunConfig, load_config and panel_config are re-exported as part of the run API.
 from hcp.benchmark import BenchmarkResult, run_benchmark
@@ -68,8 +75,15 @@ from hcp.data import (
 )
 from hcp.eligibility import EligibilityRule, eligibility, require_eligible
 from hcp.experiment import PRIMARY, ExperimentResult, run_experiment
-from hcp.forecast import generate_model_bundles
-from hcp.forecast_types import DiagnosticsTables
+from hcp.forecast import (
+    ForecastConfig,
+    assemble_model_bundles,
+    generate_model_bundles,
+    generate_origin_batch,
+    plan_model_forecasts,
+)
+from hcp.forecast_assembly import _seed_key, _source_kind
+from hcp.forecast_types import DiagnosticsTables, ForecastPlan, ForecastResult
 from hcp.panel import PRIMARY as PANEL_PRIMARY
 from hcp.panel import PanelResult, run_panel
 from hcp.report import render_figures, render_panel_figures
@@ -614,13 +628,224 @@ def _write_benchmark_v2_artifacts(
         raise
 
 
+@dataclass(frozen=True)
+class ResumeSummary:
+    """Execution history for final publication, separate from scientific results."""
+
+    workdir: Path
+    identity: ExecutionIdentity
+    resumed_batches: int
+    generated_batches: int
+    total_batches: int
+
+
+def _runtime_event(workdir: Path, event: str, **values: object) -> None:
+    """Persist and print the same concise run event."""
+    _append_runtime_event(workdir, {"event": event, **values})
+    fields = " ".join(
+        f"{key}={value}" for key, value in values.items() if value is not None
+    )
+    print(f"{event} {fields}".rstrip(), flush=True)
+
+
+@contextmanager
+def _quiet_neural() -> Iterator[None]:
+    """Scope framework logging without changing Python scientific warnings."""
+    roots = ("lightning", "pytorch_lightning", "darts")
+    names = set(roots) | {
+        name
+        for name in logging.root.manager.loggerDict
+        if any(name.startswith(root + ".") for root in roots)
+    }
+    loggers = [
+        (logging.getLogger(name), logging.getLogger(name).level) for name in names
+    ]
+    try:
+        for logger, _ in loggers:
+            logger.setLevel(logging.ERROR)
+        yield
+    finally:
+        for logger, level in loggers:
+            logger.setLevel(level)
+
+
+def _generate_or_resume_v2(
+    plan: ForecastPlan,
+    cfg: ForecastConfig,
+    identity: ExecutionIdentity,
+    workdir: Path,
+    *,
+    final_dir: Path | None = None,
+) -> tuple[ForecastResult, ResumeSummary]:
+    """Validate identity before batch access and execute missing fixed plan keys."""
+    _initialize_batch_workdir(
+        workdir, identity, resume=workdir.exists(), final_dir=final_dir
+    )
+    # Validate the log before appending; only a proved incomplete final fragment
+    # may be discarded. Otherwise it would become an invalid interior line.
+    events = _read_runtime_events(workdir)
+    runtime_path = workdir / "runtime.jsonl"
+    if runtime_path.exists():
+        lines = runtime_path.read_bytes().splitlines(keepends=True)
+        if len(lines) > len(events):
+            with runtime_path.open("r+b") as stream:
+                stream.truncate(sum(len(line) for line in lines[: len(events)]))
+        elif lines and not lines[-1].endswith(b"\n"):
+            with runtime_path.open("ab") as stream:
+                stream.write(b"\n")
+    batches = []
+    resumed = generated = 0
+    counts = {model: 0 for model in cfg.models}
+    total = len(plan.eligible_keys)
+    started = time.perf_counter()
+    current_model = None
+    try:
+        for model, index in plan.eligible_keys:
+            origin = plan.origins[index]
+            if model != current_model:
+                current_model = model
+                _runtime_event(workdir, "model_start", model=model, eta_seconds=None)
+            path = _batch_path(workdir, model, origin)
+            _reject_symlink_path(path)
+            if path.exists():
+                batch = _read_origin_batch(
+                    path,
+                    identity,
+                    model=model,
+                    target_index=index,
+                    target=plan.targets[index],
+                    origin=origin,
+                    nodes=plan.actuals.nodes,
+                    seed_spawn_key=_seed_key(plan, model, index),
+                    source_kind=_source_kind(model, cfg),
+                )
+                resumed += 1
+                event = "resume_skip"
+            else:
+                if model in ("deepar", "transformer", "deepar_enhanced"):
+                    with _quiet_neural():
+                        batch = generate_origin_batch(plan, model, index, cfg)
+                else:
+                    batch = generate_origin_batch(plan, model, index, cfg)
+                _write_origin_batch(workdir, identity, batch)
+                generated += 1
+                event = "batch_complete"
+            batches.append(batch)
+            counts[model] += 1
+            completed = len(batches)
+            elapsed = time.perf_counter() - started
+            eta = (
+                sum(item.elapsed_seconds for item in batches)
+                / completed
+                * (total - completed)
+            )
+            _write_progress(
+                workdir,
+                ProgressSnapshot(
+                    model, str(origin), completed, total, counts, elapsed, eta
+                ),
+            )
+            _runtime_event(
+                workdir,
+                event,
+                model=model,
+                origin=str(origin),
+                completed=completed,
+                total=total,
+                eta_seconds=round(eta, 3),
+            )
+        result = assemble_model_bundles(plan, tuple(batches), cfg)
+        return result, ResumeSummary(workdir, identity, resumed, generated, total)
+    except BaseException as exc:
+        _runtime_event(
+            workdir,
+            "error",
+            phase="forecast",
+            error_type=type(exc).__name__,
+            message=str(exc),
+        )
+        raise
+
+
+def _v2_execution_identity(
+    cfg: RunConfig,
+    forecast_cfg: ForecastConfig,
+    plan: ForecastPlan,
+    config_path: Path,
+    repo: Path,
+    git_sha: str,
+    input_sha256: str,
+) -> ExecutionIdentity:
+    """Capture registered CUDA and source provenance before any origin fit."""
+    provenance = _configure_v2_cuda(forecast_cfg.execution)
+    packages = (
+        "numpy",
+        "pandas",
+        "statsmodels",
+        "darts",
+        "torch",
+        "pytorch-lightning",
+        "prophet",
+        "scikit-learn",
+        "scipy",
+        "pyarrow",
+        "tqdm",
+    )
+    return ExecutionIdentity(
+        "probabilistic-model-benchmarks-v2",
+        cfg.run_id,
+        git_sha,
+        file_sha256(config_path),
+        file_sha256(repo / "uv.lock"),
+        input_sha256,
+        cfg.root_seed,
+        forecast_cfg.models,
+        tuple(f"{model}/{plan.origins[index]}" for model, index in plan.eligible_keys),
+        forecast_cfg.quantiles,
+        1,
+        platform.python_version(),
+        {name: importlib.metadata.version(name) for name in packages},
+        contract_json(provenance),
+    )
+
+
+def _evaluate_v2(
+    bundles: dict, evaluation_cfg: object, *, actuals: object, workdir: Path
+) -> BenchmarkResult:
+    """Evaluate quietly, restoring process settings even when evaluation fails."""
+    previous = os.environ.get("TQDM_DISABLE")
+    original = methods.tqdm
+    try:
+        _runtime_event(workdir, "evaluation_start")
+        os.environ["TQDM_DISABLE"] = "1"
+        # tqdm snapshots environment defaults on import; core imported it earlier.
+        methods.tqdm = partial(original, disable=True)
+        return run_benchmark(bundles, evaluation_cfg, actuals=actuals)
+    except BaseException as exc:
+        _runtime_event(
+            workdir,
+            "error",
+            phase="evaluation",
+            error_type=type(exc).__name__,
+            message=str(exc),
+        )
+        raise
+    finally:
+        methods.tqdm = original
+        if previous is None:
+            os.environ.pop("TQDM_DISABLE", None)
+        else:
+            os.environ["TQDM_DISABLE"] = previous
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point; returns 0 on success."""
     parser = argparse.ArgumentParser(
         description="Hierarchical reconciliation + conformal PID on US COVID-19 deaths"
     )
     parser.add_argument("config", type=Path)
-    cfg = load_config(parser.parse_args(argv).config)
+    config_path = parser.parse_args(argv).config
+    cfg = load_config(config_path)
     if (cfg.output_dir / cfg.run_id).exists():
         raise FileExistsError(
             f"{cfg.output_dir / cfg.run_id} exists; choose a new run_id"
@@ -628,7 +853,7 @@ def main(argv: list[str] | None = None) -> int:
     if cfg.design == "benchmark":
         out_path = cfg.output_dir / cfg.run_id
         staging = out_path.with_name(f".{out_path.name}.partial")
-        if staging.exists():
+        if staging.exists() and getattr(cfg.benchmark, "protocol_version", 1) != 2:
             raise FileExistsError(f"{staging} exists; remove it or choose a new run_id")
         repo = Path(__file__).resolve().parents[2]
         initial_git_sha = (
@@ -646,17 +871,36 @@ def main(argv: list[str] | None = None) -> int:
         assert cfg.benchmark is not None
         reference = reference_bundle(frame, actuals, cfg.benchmark.reference_forecaster)
         forecast_cfg, evaluation_cfg = benchmark_configs(cfg)
-        generated = generate_model_bundles(
-            actuals,
-            reference.dates,
-            reference.forecast_dates,
-            forecast_cfg,
-        )
+        if initial_git_sha is None:
+            generated = generate_model_bundles(
+                actuals,
+                reference.dates,
+                reference.forecast_dates,
+                forecast_cfg,
+            )
+        else:
+            plan = plan_model_forecasts(
+                actuals, reference.dates, reference.forecast_dates, forecast_cfg
+            )
+            identity = _v2_execution_identity(
+                cfg, forecast_cfg, plan, config_path, repo, initial_git_sha, digest
+            )
+            generated, _resume_summary = _generate_or_resume_v2(
+                plan,
+                forecast_cfg,
+                identity,
+                staging,
+                final_dir=out_path,
+            )
         bundles = {
             **generated.bundles,
             cfg.benchmark.reference_model: reference,
         }
-        result = run_benchmark(bundles, evaluation_cfg, actuals=actuals)
+        result = (
+            run_benchmark(bundles, evaluation_cfg, actuals=actuals)
+            if initial_git_sha is None
+            else _evaluate_v2(bundles, evaluation_cfg, actuals=actuals, workdir=staging)
+        )
         forecast_diagnostics = {
             **generated.diagnostics,
             "canonical_truth": {
