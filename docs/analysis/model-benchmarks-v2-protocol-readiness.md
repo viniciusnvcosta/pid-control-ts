@@ -1,6 +1,6 @@
 # Model benchmarks v2 protocol readiness
 
-**Status: final whole-branch review requested changes; its consolidated fixes require independent rereview before launch.** Earlier resumable CUDA repeatability and full physical-CUDA verification passed at `025767b`; final-fix verification is recorded separately below. This is a protocol and verification record, not an outcome report. No official v2 result has been published.
+**Status: final whole-branch review passed after the consolidated fix at `8a48f17`; the implementation is ready for the separately authorized official launch.** The scoped rereview marked all six P2 and five P3 findings addressed, with spec PASS and quality APPROVE. Fresh clean-commit physical-CUDA verification passed with 614 tests and one legacy-artifact skip. This is a protocol and verification record, not an outcome report. No official v2 result has been published.
 
 ## Registered identity
 
@@ -95,4 +95,4 @@ Both evaluation and the final writer reject nonfinite scored metric or contrast 
 
 The final manifest includes `execution_identity_digest`, using the same compact canonical identity hash as each immutable batch, and describes independent `(block, family)` Holm groups with 96 and 56 members. `publication-ready` is a prepublication runtime event included in the artifact hashes before the manifest is written last. Only a successful atomic rename emits external `publication-complete` JSON; a failure can leave a ready event in the preserved partial directory, never a completion event. Published files are not modified after hashing.
 
-The consolidated fix evidence is `.superpowers/sdd/2026-10-23-model-benchmarks-v2-resumable-cuda/final-fix-report.md`. Independent rereview, fresh verification from a clean final implementation SHA, and separate explicit launch authorization remain required. No official benchmark was used to test these fixes.
+The consolidated fix evidence is `.superpowers/sdd/2026-10-23-model-benchmarks-v2-resumable-cuda/final-fix-report.md`. The independent scoped rereview resolved all six P2 and five P3 findings with no new Critical or P2 finding. It independently passed 167 focused tests and the reduced real-data integration, and accepted the retained clean-commit physical-CUDA result of 614 passed with one legacy-artifact skip. The official benchmark was not used to test these fixes.
