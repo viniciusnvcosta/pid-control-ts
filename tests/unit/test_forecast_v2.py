@@ -69,7 +69,12 @@ def test_v2_adapter_retains_native_quantiles_and_warning_rows(monkeypatch) -> No
         "phase",
         "count",
     } <= set(result.tables.warnings.columns)
-    assert result.tables.forecast_diagnostics.empty
+    assert len(result.tables.forecast_diagnostics) == 14
+    assert set(result.tables.forecast_diagnostics["name"]) == {
+        "adapter_completed",
+        "origin_seed",
+    }
+    assert result.tables.forecast_diagnostics.groupby("model").size().eq(2).all()
     assert set(result.base_forecasts.query("model == 'qr_l1'")["source_kind"]) == {
         "native_quantiles"
     }

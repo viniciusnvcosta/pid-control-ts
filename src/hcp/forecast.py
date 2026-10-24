@@ -2,6 +2,7 @@
 # ABOUTME: Prepares prefix-only histories, assigns deterministic seeds, and returns immutable bundles without I/O.
 """Causal benchmark forecast orchestration."""
 
+import json
 import time
 import warnings
 from collections import Counter
@@ -25,6 +26,7 @@ from hcp.forecast_classical import (
     sarima_prediction,
 )
 from hcp.forecast_deepar import enhanced_deepar_prediction
+from hcp.forecast_diagnostics import _json_diagnostic, adapter_diagnostic_rows
 from hcp.forecast_models import (
     ForecastSettings,
     PreparedHistory,
@@ -296,16 +298,10 @@ def generate_origin_batch(
         q = prediction_quantiles(output)
         if output.diagnostics:
             warning_counts.update(output.diagnostics.get("warning_counts", {}))
-            for key in (
-                "forecast_diagnostics",
-                "tuning",
-                "quantile_repairs",
-                "warnings",
-            ):
-                for row in output.diagnostics.get(key, ()):
-                    diagnostic_rows[key].append(
-                        {"model": model_name, "origin": origin, **row}
-                    )
+        for key, rows in adapter_diagnostic_rows(
+            output.diagnostics or {}, model_name, origin
+        ).items():
+            diagnostic_rows[key].extend(rows)
     else:
         samples = np.asarray(output)
     if samples is not None:
@@ -326,6 +322,20 @@ def generate_origin_batch(
             ).T
     if np.any(np.diff(q, axis=-1) < 0):
         raise ValueError(f"model {model_name!r} returned crossed quantiles")
+    if cfg.protocol_version == 2:
+        diagnostic_rows["forecast_diagnostics"].append(
+            {
+                "model": model_name,
+                "node": None,
+                "forecast_date": origin,
+                "origin": origin,
+                "phase": "outer_fit",
+                "name": "origin_seed",
+                "value": json.dumps(
+                    _json_diagnostic(origin_seed.state), sort_keys=True, allow_nan=False
+                ),
+            }
+        )
     interpolation = tuple(
         {"origin": str(pd.Timestamp(plan.origins[target_index]).date()), **record}
         for record in records

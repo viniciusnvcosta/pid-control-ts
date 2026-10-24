@@ -7,7 +7,7 @@ import torch
 from darts.models.forecasting.pl_forecasting_module import io_processor
 from darts.models.forecasting.rnn_model import CustomRNNModule
 from darts.utils.likelihood_models import GaussianLikelihood
-from pytorch_lightning import Trainer
+from pytorch_lightning import LightningModule, Trainer
 from torch import nn
 from torch.utils.data import DataLoader
 
@@ -21,6 +21,7 @@ from hcp.forecast_deepar_data import (
 )
 from hcp.forecast_deepar_rollout import recurrent_rollout
 from hcp.forecast_neural_validation import (
+    CandidateSelection,
     CandidateTrainingResult,
     NeuralEpochCallback,
     PhaseCapture,
@@ -160,7 +161,9 @@ class EnhancedCandidate:
         """Advance one epoch for characterization callers."""
         self._fit_epochs(1)
 
-    def _fit_epochs(self, epochs, selection=None):
+    def _fit_epochs(
+        self, epochs: int, selection: CandidateSelection | None = None
+    ) -> None:
         self.module.train()
         with quiet_neural_logs():
             trainer = Trainer(
@@ -179,7 +182,7 @@ class EnhancedCandidate:
             trainer.fit(self.module, train_dataloaders=self.loader)
         self.module.to(self.execution.device)
 
-    def _finish_epoch(self, trainer, module):
+    def _finish_epoch(self, trainer: Trainer, module: LightningModule) -> None:
         loss = trainer.callback_metrics.get("train_loss")
         if (
             loss is None
@@ -191,7 +194,9 @@ class EnhancedCandidate:
             )
         self.epochs_trained += 1
 
-    def _resume_training(self, trainer, module, another_epoch):
+    def _resume_training(
+        self, trainer: Trainer, module: LightningModule, another_epoch: bool
+    ) -> None:
         module._trainer = trainer
         module.train()
 

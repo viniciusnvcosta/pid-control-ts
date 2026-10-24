@@ -33,7 +33,12 @@ from hcp.panel_metrics import (
     node_metrics,
     node_scale,
 )
-from hcp.reconcile import available_errors, evaluation_start, reconcile_bundle
+from hcp.reconcile import (
+    Reconciled,
+    available_errors,
+    evaluation_start,
+    reconcile_bundle,
+)
 from hcp.report import RAW_LR
 from hcp.stats import draw_blocks, holm, summarize_diff
 
@@ -112,6 +117,7 @@ def forecaster_arms(
     *,
     evaluation_index: int | None = None,
     fixed_pi_scales: np.ndarray | None = None,
+    reconciliation_evidence: dict[str, Reconciled] | None = None,
 ) -> ForecasterArms:
     """Reconcile and conformalize every scored node on the forecaster's evaluation window.
 
@@ -151,7 +157,14 @@ def forecaster_arms(
     )
     q, intervals, crossings, root_crossings, shrinkage = {}, {}, {}, {}, {}
     for reconciler in cfg.reconcilers:
-        rec = reconcile_bundle(bundle, reconciler, cfg.mint_warmup)
+        rec = reconcile_bundle(
+            bundle,
+            reconciler,
+            cfg.mint_warmup,
+            collect_evidence=reconciliation_evidence is not None,
+        )
+        if reconciliation_evidence is not None:
+            reconciliation_evidence[reconciler] = rec
         crossings[reconciler] = rec.crossings
         root_crossings[reconciler] = rec.root_crossings
         if np.isfinite(rec.shrinkage[t0:]).all():

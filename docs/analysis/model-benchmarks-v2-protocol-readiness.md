@@ -1,6 +1,6 @@
 # Model benchmarks v2 protocol readiness
 
-**Status: resumable CUDA repeatability and full physical-CUDA verification passed; whole-branch review remains a launch gate.** This is a protocol and verification record, not an outcome report. No official v2 result has been published.
+**Status: final whole-branch review requested changes; its consolidated fixes require independent rereview before launch.** Earlier resumable CUDA repeatability and full physical-CUDA verification passed at `025767b`; final-fix verification is recorded separately below. This is a protocol and verification record, not an outcome report. No official v2 result has been published.
 
 ## Registered identity
 
@@ -31,6 +31,8 @@ The reduced development integration checks adapter availability and interfaces, 
 The first pre-amendment full attempt completed most computation but refused publication because Git `HEAD` changed during execution. A second attempt was stopped before changing the execution design. Both attempts remain unpublished; neither produced `results/model-benchmarks-v2/`. This record makes no outcome interpretation.
 
 The prospective amendment design is `5a6b13b81ec450f3f5f4d97aa0866c18ec149d97`; registration/contracts are `e5a7d91fdb4b84d9f7ff4bda900032968e830450`. Task 9 verified implementation through atomic resumed publication at `2aea38b4cdb11afc92a222dab9107fafa34a5711`. These anchors are not a future launch SHA: launch must record the final reviewed clean `HEAD`, including documentation and review fixes.
+
+D33 in [`protocol-decisions.md`](../protocol-decisions.md) prospectively registers the amended exact config hash and execution/provenance clauses while retaining D32 as history. Scientific settings remain fixed; D33 does not authorize execution or interpretation.
 
 On 2026-10-24 the prescribed repeatability suite ran twice outside the sandbox on physical `cuda:0`: NVIDIA GeForce RTX 4080, UUID `GPU-f3dad84a-4909-bd89-f509-0c2f79debd6f`, 16376 MiB, driver `610.88`, Torch `2.14.1+cu130`, CUDA runtime `13.0`, cuDNN `92400`; CUDA available. Both invocations passed **15 tests**, with **77 reviewed dependency warnings** each, in **23.03 s** and **21.99 s**. CPU characterization cases coexist with actual CUDA cases. Warnings concern CPU fixtures, absent validation loaders, pytree deprecation, low worker count, nested tensors, and empty prediction loaders.
 
@@ -80,3 +82,17 @@ UV_CACHE_DIR=/tmp/model-benchmarks-v2-cuda UV_NO_SYNC=1 uv run python -m hcp.run
 Resume requires absent final output and matching full execution identity: Git SHA, config/input/lock hashes, seed and origin plan, packages, device, GPU UUID, driver, runtime, and deterministic precision settings. The CUDA contract uses `cuda:0`, FP32 `32-true`, no TF32, and cuBLAS workspace `:4096:8`; no CPU fallback is accepted. A mismatch preserves evidence and stops. Keep `HEAD` fixed through publication and across resume: **do not commit, merge, rebase, pull, or checkout during execution**. Do not change dependencies, inputs, config, or device environment. Progress and ETA are advisory; validated batches govern recovery.
 
 Final publication atomically renames the hidden work directory to immutable `results/model-benchmarks-v2/` after revalidating evidence and Git identity. An existing result is never overwritten. Task 9 did not launch the official benchmark; both registered final and hidden directories were absent at verification.
+
+## Canonical diagnostics and final-review fixes
+
+Generation tables and evaluation-stage evidence are combined before canonical publication. `tuning.parquet` retains one row per QR node/origin/alpha with a numeric `score`, string `candidate`, and Boolean `selected`; exactly one alpha per node/origin is selected. Neural tuning uses one row per width, including its best fourth-step NLL, earliest best epoch, actual epochs run, inner-fit scales and enhanced covariate transforms. Exact ties retain the registered alpha/width rules. The canonical manifest's selected-candidate summary uses these same records.
+
+`forecast_diagnostics.parquet` stores structured events by model, node (null for global records), forecast date, phase, name and value. Nested adapter evidence is canonical JSON in `value`: neural child-stream addresses, Prophet node seeds, QR adjustment summaries, and full-refit width/epochs/scales/covariates survive Arrow persistence and exact resume. The `origin_seed` event includes the complete NumPy seed state; `final_fit` events use phase `full_refit`, separately from inner-fit tuning rows. Arrays in manifest summaries remain numeric lists, and absent fields in heterogeneous schemas become JSON null.
+
+`quantile_repairs.parquet` retains base and reconciliation stages separately. Reconciliation records include method, node, forecast/target dates, pre/post quantiles, crossing flag and absolute adjustment summaries. Per-origin events retain pre/post root-minus-leaf-sum coherence residuals at all three quantiles, adjusted/crossing cell counts, root crossings and mean/max adjustments for each reconciler. Sorting after projection can break quantile coherence; these events disclose that loss. Legacy reconciliation formulas and v1 output behavior remain unchanged.
+
+Both evaluation and the final writer reject nonfinite scored metric or contrast columns, including descriptive arms, with cell context. The existing incoherent 57-node synthetic fixture triggers the core PI tangent saturation under `bottom_up/pi_norm`; its regression requires failure. This is a synthetic characterization, not an official outcome. No finite gate, controller setting, score, seed, or `core/` implementation was changed to accommodate it.
+
+The final manifest includes `execution_identity_digest`, using the same compact canonical identity hash as each immutable batch, and describes independent `(block, family)` Holm groups with 96 and 56 members. `publication-ready` is a prepublication runtime event included in the artifact hashes before the manifest is written last. Only a successful atomic rename emits external `publication-complete` JSON; a failure can leave a ready event in the preserved partial directory, never a completion event. Published files are not modified after hashing.
+
+The consolidated fix evidence is `.superpowers/sdd/2026-10-23-model-benchmarks-v2-resumable-cuda/final-fix-report.md`. Independent rereview, fresh verification from a clean final implementation SHA, and separate explicit launch authorization remain required. No official benchmark was used to test these fixes.

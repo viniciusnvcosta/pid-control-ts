@@ -118,6 +118,26 @@ class NeuralCandidate(Protocol):
         ...
 
 
+class NeuralLifecycle(NeuralCandidate, Protocol):
+    """Internal candidate contract required by the single-fit Trainer lifecycle."""
+
+    def _finish_epoch(self, trainer: Trainer, module: LightningModule) -> None:
+        """Validate and record one completed training epoch."""
+        ...
+
+    def _resume_training(
+        self, trainer: Trainer, module: LightningModule, another_epoch: bool
+    ) -> None:
+        """Restore training context after nested validation prediction."""
+        ...
+
+    def _fit_epochs(
+        self, epochs: int, selection: "CandidateSelection | None" = None
+    ) -> None:
+        """Fit once with the optional per-epoch selection callback."""
+        ...
+
+
 def _validate_streams(
     streams: Mapping[str, tuple[np.random.SeedSequence, ...]], count: int
 ) -> None:
@@ -291,7 +311,7 @@ class NeuralEpochCallback(Callback):
 
     def __init__(
         self,
-        candidate: NeuralCandidate,
+        candidate: NeuralLifecycle,
         max_epochs: int,
         selection: CandidateSelection | None = None,
     ) -> None:
@@ -314,7 +334,7 @@ class NeuralEpochCallback(Callback):
 
 
 def fit_candidate_selection(
-    candidate: NeuralCandidate,
+    candidate: NeuralLifecycle,
     split: TemporalSplit,
     seed: np.random.SeedSequence,
     max_epochs: int,
