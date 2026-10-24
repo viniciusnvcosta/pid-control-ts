@@ -1,6 +1,6 @@
 # Model benchmarks v2 protocol readiness
 
-**Status: final whole-branch review passed after the consolidated fix at `8a48f17`; the implementation is ready for the separately authorized official launch.** The scoped rereview marked all six P2 and five P3 findings addressed, with spec PASS and quality APPROVE. Fresh clean-commit physical-CUDA verification passed with 614 tests and one legacy-artifact skip. This is a protocol and verification record, not an outcome report. No official v2 result has been published.
+**Status: the official run published successfully from clean Git SHA `06eb8017e6f302825debecf0acbc65abc4b7960d` on 2026-10-24.** The final whole-branch review and the scoped UUID-launch-fix review both passed. Fresh clean-commit physical-CUDA verification passed with 620 tests and one legacy-artifact skip before launch. This is a protocol and verification record, not an outcome report; it does not authorize scientific interpretation.
 
 ## Registered identity
 
@@ -25,6 +25,16 @@ Repository Ruff gates passed after the consolidated fix: `ruff check .` reported
 ## Remaining limits and launch boundary
 
 The reduced development integration checks adapter availability and interfaces, not forecast quality or the registered common-window result. Bootstrap intervals are pointwise and conditional on completed fitted pipelines. The study is exploratory, and D15's truth-vintage and PI look-ahead limitations remain. These do not change after protocol registration.
+
+## Official execution and publication audit
+
+The official command ran on the registered physical `cuda:0` device and exited with code 0 after 11,715.53 seconds. It generated all 602 registered model-origin batches: 86 origins for each of ARIMA, SARIMA, DeepAR, Prophet, Transformer, local L1 quantile regression, and enhanced DeepAR. The runner emitted external `publication-complete` evidence with execution-identity digest `6c01c5381b453e14d6104f006acf92a39c295ae8b506ea3022234150cc744951`, atomically promoted the work directory, and left no `.model-benchmarks-v2.partial` directory.
+
+The published bundle is the local, gitignored `results/model-benchmarks-v2/` directory. A read-only post-publication audit recalculated all 3,630 SHA-256 entries in `manifest.json`; no file was missing or different. The manifest, `run-state.json`, config, input, lockfile, initial/final Git SHA, exact CUDA identity, and canonical identity digest agree. All 602 batch directories contain the registered six-file payload, and all 34,314 generated batch forecast rows have 57 nodes with finite ordered quantiles.
+
+The ten canonical Parquet tables opened successfully. Their row counts are 62,472 base forecasts, 344,736 evaluated intervals, 5,472 node metrics, 192 level metrics, 168 model contrasts, 288 hierarchy contrasts, 19,952 tuning records, 794 quantile-repair records, 2,360 warning records, and 10,086 forecast-diagnostic records. The evaluation tables cover eight models, 57 nodes, 63 common weeks, and all twelve reconciler-controller cells with finite scored metrics and contrasts. The 20,349 unavailable rows in the longer 137-week base-forecast frame use complete three-quantile null triplets; none enters the finite common evaluation window. The 1,542 final rows with `lo > hi` are registered empty PI sets and remain visible in `empty_set_rate`.
+
+The warning table represents 30,945 occurrences after aggregation. Darts-backed models account for 30,340: 344 for DeepAR, 1,032 for enhanced DeepAR, and 28,964 for Transformer. The remaining 605 are ARIMA/SARIMA estimation or convergence warnings. These counts are retained diagnostic evidence; the successful hard gates establish structural and numerical validity, not forecast quality.
 
 ## Prospective CUDA amendment and unpublished attempts
 
@@ -81,7 +91,7 @@ UV_CACHE_DIR=/tmp/model-benchmarks-v2-cuda UV_NO_SYNC=1 uv run python -m hcp.run
 
 Resume requires absent final output and matching full execution identity: Git SHA, config/input/lock hashes, seed and origin plan, packages, device, GPU UUID, driver, runtime, and deterministic precision settings. The CUDA contract uses `cuda:0`, FP32 `32-true`, no TF32, and cuBLAS workspace `:4096:8`; no CPU fallback is accepted. A mismatch preserves evidence and stops. Keep `HEAD` fixed through publication and across resume: **do not commit, merge, rebase, pull, or checkout during execution**. Do not change dependencies, inputs, config, or device environment. Progress and ETA are advisory; validated batches govern recovery.
 
-Final publication atomically renames the hidden work directory to immutable `results/model-benchmarks-v2/` after revalidating evidence and Git identity. An existing result is never overwritten. Task 9 did not launch the official benchmark; both registered final and hidden directories were absent at verification.
+Final publication atomically renames the hidden work directory to immutable `results/model-benchmarks-v2/` after revalidating evidence and Git identity. An existing result is never overwritten. Task 9 itself did not launch the benchmark; the separately authorized official execution later published the audited bundle described above.
 
 ## Canonical diagnostics and final-review fixes
 
