@@ -11,6 +11,7 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 from hcp.benchmark import BenchmarkConfig
+from hcp.config_benchmark_v2 import BenchmarkV2Settings
 from hcp.conformal import CONTROLLERS, ControllerConfig
 from hcp.data import FORECASTER
 from hcp.forecast import ForecastConfig
@@ -117,7 +118,7 @@ class RunConfig:
     min_eval_weeks: int = 60
     max_leaf_imputed: float = 0.05
     duplicate_share: float = 0.95
-    benchmark: BenchmarkSettings | None = None
+    benchmark: BenchmarkSettings | BenchmarkV2Settings | None = None
 
     def __post_init__(self) -> None:
         if not self.run_id or Path(self.run_id).name != self.run_id:
@@ -133,7 +134,12 @@ class RunConfig:
         for name in ("data_path", "output_dir"):
             object.__setattr__(self, name, Path(getattr(self, name)).expanduser())
         if isinstance(self.benchmark, dict):
-            object.__setattr__(self, "benchmark", BenchmarkSettings(**self.benchmark))
+            settings_type = (
+                BenchmarkV2Settings
+                if self.benchmark.get("protocol_version") == 2
+                else BenchmarkSettings
+            )
+            object.__setattr__(self, "benchmark", settings_type(**self.benchmark))
         if self.design not in ("us", "panel", "benchmark"):
             raise ValueError(
                 f"design must be 'us', 'panel', or 'benchmark', got {self.design!r}"
@@ -155,8 +161,6 @@ class RunConfig:
             if len(set(self.forecasters)) != len(self.forecasters):
                 raise ValueError("forecasters must not contain duplicates")
         else:
-            if self.controllers != ("raw", "pi"):
-                raise ValueError("benchmark controllers must be ('raw', 'pi')")
             expected_reconcilers = (
                 "none",
                 "bottom_up",
@@ -168,12 +172,48 @@ class RunConfig:
                     f"benchmark reconcilers must be {expected_reconcilers!r}"
                 )
             assert self.benchmark is not None
+            expected_controllers = (
+                ("raw", "pi", "pi_norm")
+                if isinstance(self.benchmark, BenchmarkV2Settings)
+                else ("raw", "pi")
+            )
+            if self.controllers != expected_controllers:
+                raise ValueError(
+                    f"benchmark controllers must be {expected_controllers!r}"
+                )
             if self.ahead != self.benchmark.ahead:
                 raise ValueError("run and benchmark horizons must match")
             if self.min_eval_weeks != self.benchmark.min_eval_weeks:
                 raise ValueError(
                     "run and benchmark minimum evaluation weeks must match"
                 )
+            if isinstance(self.benchmark, BenchmarkV2Settings):
+                registered = {
+                    "run_id": "model-benchmarks-v2",
+                    "root_seed": 20261021,
+                    "data_path": Path("data/deaths.csv"),
+                    "expected_sha256": "cb4dccfd21d6c08b1247aa9a7c6a8d93f7c373871526cfcb4860df884b54ac06",
+                    "alpha": 0.2,
+                    "lr": 0.1,
+                    "lr_grid": (0.1,),
+                    "Csat": 2.0,
+                    "KI": 1000.0,
+                    "T_burnin": 5,
+                    "ahead": 4,
+                    "reconcilers": expected_reconcilers,
+                    "controllers": ("raw", "pi", "pi_norm"),
+                    "mint_warmup": 20,
+                    "rolling_window": 10,
+                    "blocks": (8, 4, 12),
+                    "n_boot": 2000,
+                    "min_eval_weeks": 60,
+                }
+                for name, expected in registered.items():
+                    if getattr(self, name) != expected:
+                        raise ValueError(
+                            f"v2 {name} must be fixed at {expected!r}, "
+                            f"got {getattr(self, name)!r}"
+                        )
         if "none" not in self.reconcilers:
             raise ValueError("reconcilers must include the 'none' control")
         if unknown := set(self.reconcilers) - set(RECONCILERS):
@@ -198,7 +238,12 @@ def load_config(path: Path) -> RunConfig:
         values = tomllib.load(handle)
     try:
         if "benchmark" in values:
-            values["benchmark"] = BenchmarkSettings(**values["benchmark"])
+            settings_type = (
+                BenchmarkV2Settings
+                if values["benchmark"].get("protocol_version") == 2
+                else BenchmarkSettings
+            )
+            values["benchmark"] = settings_type(**values["benchmark"])
         return RunConfig(**values)
     except TypeError as exc:
         raise ValueError(f"invalid run configuration: {exc}") from exc
@@ -246,6 +291,31 @@ def benchmark_configs(cfg: RunConfig) -> tuple[ForecastConfig, BenchmarkConfig]:
     if cfg.design != "benchmark" or cfg.benchmark is None:
         raise ValueError("benchmark_configs requires design 'benchmark'")
     settings = cfg.benchmark
+    if isinstance(settings, BenchmarkV2Settings):
+        if cfg.root_seed != 20261021:
+            raise ValueError("v2 root_seed must be 20261021")
+        forecast = ForecastConfig(
+            models=settings.models,
+            quantiles=settings.quantiles,
+            min_train_weeks=settings.min_train_weeks,
+            refit_every=settings.refit_every,
+            root_seed=cfg.root_seed,
+            seed_spawn_key=settings.forecast_seed_spawn_key,
+            settings=settings.model_settings,
+            protocol_version=2,
+            v2_settings=settings.model_settings,
+            execution=settings.execution,
+        )
+        panel = replace(panel_config(cfg), primary_forecaster=settings.reference_model)
+        benchmark = BenchmarkConfig(
+            panel=panel,
+            models=settings.models,
+            reference_model=settings.reference_model,
+            min_eval_weeks=settings.min_eval_weeks,
+            seed_spawn_key=settings.evaluation_seed_spawn_key,
+            protocol_version=2,
+        )
+        return forecast, benchmark
     forecast_settings = ForecastSettings(
         ahead=settings.ahead,
         n_samples=settings.n_samples,
@@ -281,8 +351,10 @@ def benchmark_configs(cfg: RunConfig) -> tuple[ForecastConfig, BenchmarkConfig]:
 
 
 def config_manifest(cfg: RunConfig) -> dict:
-    """Return a serializable config mapping without absent optional sections."""
+    """Return a serializable config mapping, including the v2 execution contract."""
     values = asdict(cfg)
     if cfg.benchmark is None:
         values.pop("benchmark")
+    elif isinstance(cfg.benchmark, BenchmarkV2Settings):
+        values["benchmark"]["execution"] = asdict(cfg.benchmark.execution)
     return values

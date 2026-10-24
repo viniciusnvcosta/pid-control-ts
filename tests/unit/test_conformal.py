@@ -17,7 +17,7 @@ def _narrow_series(n: int = 300, seed: int = 0) -> tuple[np.ndarray, ...]:
 
 
 def test_registry_names() -> None:
-    assert set(CONTROLLERS) == {"raw", "pi", "pid_theta"}
+    assert set(CONTROLLERS) == {"raw", "pi", "pid_theta", "pi_norm"}
 
 
 def test_cqr_scores_follow_paper_definition() -> None:

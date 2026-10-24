@@ -83,6 +83,47 @@ def node_metrics(
     return values
 
 
+def v2_node_metrics(
+    y: np.ndarray,
+    lo: np.ndarray,
+    hi: np.ndarray,
+    scale: np.ndarray,
+    *,
+    alpha: float,
+    window: int,
+) -> dict[str, np.ndarray]:
+    """Add v2 coverage-error and physical-width metrics to legacy node metrics.
+
+    Args:
+        y: Truth, with weeks on the last axis.
+        lo: Final lower bounds, broadcastable to ``y``; retained even if crossed.
+        hi: Final upper bounds, broadcastable to ``y``.
+        scale: Fixed scoring scales, broadcastable to per-node metric values.
+        alpha: Target miscoverage rate.
+        window: Rolling-coverage window in weeks.
+
+    Returns:
+        Legacy metrics plus absolute marginal coverage error computed before
+        leaf aggregation, mean nonnegative set width and its scaled value,
+        and the fraction of weeks with strictly crossed (empty) final bounds.
+        Legacy widths remain signed spans and scores remain quantile-pair loss.
+    """
+    y, lo, hi = np.broadcast_arrays(y, lo, hi)
+    values = evaluate_batch(y, lo, hi, alpha=alpha, window=window)
+    scale = np.asarray(scale, dtype=float)
+    scale_shape = (len(scale),) + (1,) * (values["interval_score"].ndim - 1)
+    broadcast_scale = scale.reshape(scale_shape)
+    values["scaled_mean_width"] = values["mean_width"] / broadcast_scale
+    values["scaled_interval_score"] = values["interval_score"] / broadcast_scale
+    values["marginal_coverage_error"] = np.abs(
+        values["marginal_coverage"] - (1 - alpha)
+    )
+    values["mean_set_width"] = np.maximum(hi - lo, 0.0).mean(axis=-1)
+    values["scaled_mean_set_width"] = values["mean_set_width"] / broadcast_scale
+    values["empty_set_rate"] = (lo > hi).mean(axis=-1)
+    return values
+
+
 def level_values(
     values: dict[str, np.ndarray], endpoint: np.ndarray
 ) -> dict[str, dict[str, np.ndarray]]:

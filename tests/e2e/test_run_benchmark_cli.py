@@ -261,7 +261,7 @@ def test_benchmark_cli_uses_real_data_boundaries_and_writes_common_window(
         io_calls["hash"] += 1
         return real_hash(*args, **kwargs)
 
-    def fake_adapter(histories, settings, seed):
+    def fake_adapter(histories, settings, seed, execution):
         calls.append((tuple(history.node for history in histories), seed.spawn_key))
         samples = np.empty((len(histories), settings.ahead, settings.n_samples))
         offsets = np.linspace(-4.0, 4.0, settings.n_samples)

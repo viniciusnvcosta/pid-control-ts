@@ -8,6 +8,7 @@ from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
 
 from hcp.benchmark import BenchmarkResult
+from hcp.benchmark_report_v2 import v2_figures
 from hcp.report import RECONCILER_COLORS
 
 MODEL_LABELS = {
@@ -174,6 +175,8 @@ def benchmark_figures(
     Returns:
         Stable artifact stem to in-memory matplotlib figure.
     """
+    if result.diagnostics.get("protocol_version", 1) == 2:
+        return v2_figures(result, block=block)
     return {
         "forest-leaf-mean-pi": _forest(result, level="leaf_mean", block=block, lr=lr),
         "forest-us-pi": _forest(result, level="us", block=block, lr=lr),

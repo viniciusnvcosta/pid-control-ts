@@ -28,12 +28,14 @@ class Reconciled:
         crossings: Number of (node, week) cells whose levels had to be re-sorted.
         root_crossings: Same count restricted to node 0 (the US row).
         shrinkage: MinT lambda per week ``[T]``; NaN where no covariance was estimated.
+        pre_repair: Optional owned projected values before sorting, v2 evidence only.
     """
 
     q: np.ndarray
     crossings: int
     root_crossings: int
     shrinkage: np.ndarray
+    pre_repair: np.ndarray | None = None
 
 
 def summing_matrix(n_leaves: int) -> np.ndarray:
@@ -174,13 +176,16 @@ def crossing_mask(q: np.ndarray, rtol: float = 1e-9) -> np.ndarray:
     return (diffs < -rtol * scale[..., None]).any(axis=-1) & defined
 
 
-def reconcile_bundle(bundle: HierarchyBundle, method: str, warmup: int) -> Reconciled:
+def reconcile_bundle(
+    bundle: HierarchyBundle, method: str, warmup: int, *, collect_evidence: bool = False
+) -> Reconciled:
     """Reconcile every week; MinT re-estimates its covariance causally each week.
 
     Args:
         bundle: Data stage output.
         method: A key of ``RECONCILERS``.
         warmup: Minimum number of known complete error weeks before MinT is defined.
+        collect_evidence: Retain projected values for v2 repair/coherence records.
 
     Raises:
         ValueError: On an unknown method or ``warmup < 2``.
@@ -206,4 +211,5 @@ def reconcile_bundle(bundle: HierarchyBundle, method: str, warmup: int) -> Recon
         crossings=int(crossed.sum()),
         root_crossings=int(crossed[0].sum()),
         shrinkage=shrinkage,
+        pre_repair=out.copy() if collect_evidence else None,
     )

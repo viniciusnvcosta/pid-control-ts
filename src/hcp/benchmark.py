@@ -3,12 +3,18 @@
 """Common-window model benchmark evaluation."""
 
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 
 import numpy as np
 import pandas as pd
 
+from hcp.benchmark_data import ActualPanel
+from hcp.benchmark_reconciliation import reconciliation_tables
+from hcp.benchmark_stats import ARM_CELLS, v2_contrast_tables
+from hcp.conformal import fixed_pi_scales
 from hcp.data import ROOT, TERRITORIES, HierarchyBundle
+from hcp.forecast_preparation import _prepare_origin
+from hcp.forecast_types import DiagnosticsTables
 from hcp.panel import PanelConfig, forecaster_arms, forecaster_contrasts
 from hcp.panel_metrics import (
     PANEL_METRICS,
@@ -19,6 +25,7 @@ from hcp.panel_metrics import (
     metrics_frame,
     node_metrics,
     node_scale,
+    v2_node_metrics,
 )
 from hcp.reconcile import evaluation_start
 from hcp.report import RAW_LR
@@ -37,6 +44,7 @@ class BenchmarkConfig:
     reference_model: str
     min_eval_weeks: int = 60
     seed_spawn_key: tuple[int, ...] = (1,)
+    protocol_version: int = 1
 
     def __post_init__(self) -> None:
         if not self.models or len(set(self.models)) != len(self.models):
@@ -47,6 +55,10 @@ class BenchmarkConfig:
             raise ValueError("min_eval_weeks must be positive")
         if any(value < 0 for value in self.seed_spawn_key):
             raise ValueError("seed spawn keys must be non-negative")
+        if self.protocol_version not in (1, 2):
+            raise ValueError("protocol_version must be 1 or 2")
+        if self.protocol_version == 2 and len(self.models) != 7:
+            raise ValueError("protocol v2 requires seven generated models")
 
 
 @dataclass(frozen=True)
@@ -60,6 +72,7 @@ class BenchmarkResult:
     hierarchy_contrasts: pd.DataFrame
     model_contrasts: pd.DataFrame
     diagnostics: dict
+    tables: DiagnosticsTables = field(default_factory=DiagnosticsTables)
 
 
 def _required_models(cfg: BenchmarkConfig) -> tuple[str, ...]:
@@ -117,6 +130,14 @@ def common_evaluation_index(
             configured number of common weeks.
     """
     reference = _validate_aligned(bundles, cfg)
+    if cfg.protocol_version == 2:
+        endpoint_count = sum(
+            node != ROOT and node not in TERRITORIES for node in reference.nodes
+        )
+        if len(reference.nodes) != 57 or endpoint_count != 51:
+            raise ValueError(
+                "protocol v2 requires all 57 nodes and 51 state/DC endpoints"
+            )
     starts = [
         evaluation_start(bundles[model], cfg.panel.mint_warmup)
         for model in _required_models(cfg)
@@ -261,9 +282,18 @@ def _model_contrasts(
 
 
 def run_benchmark(
-    bundles: Mapping[str, HierarchyBundle], cfg: BenchmarkConfig
+    bundles: Mapping[str, HierarchyBundle],
+    cfg: BenchmarkConfig,
+    *,
+    actuals: ActualPanel | None = None,
 ) -> BenchmarkResult:
     """Evaluate hierarchy arms and model-reference contrasts on one common window."""
+    if cfg.protocol_version == 2:
+        if actuals is None:
+            raise ValueError(
+                "protocol v2 requires canonical actuals for the fixed PI scale"
+            )
+        return _run_benchmark_v2(bundles, cfg, actuals)
     start = common_evaluation_index(bundles, cfg)
     order = _required_models(cfg)
     root = np.random.SeedSequence(cfg.panel.root_seed, spawn_key=cfg.seed_spawn_key)
@@ -329,3 +359,198 @@ def run_benchmark(
             "models": {model: arms[model].diagnostics for model in order},
         },
     )
+
+
+def _fixed_common_pi_scales(
+    actuals: ActualPanel, forecast_date: np.datetime64
+) -> np.ndarray:
+    """Calculate scales from the prepared prefix at the first common cutoff."""
+    prepared = _prepare_origin(actuals, forecast_date, min_train_weeks=60)
+    if prepared is None:
+        raise ValueError("first common evaluation cutoff has no eligible PI history")
+    histories, _ = prepared
+    return fixed_pi_scales(histories)
+
+
+def _v2_metric_frames(
+    model: str, arms: ForecasterArms, *, alpha: float, window: int
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Build per-node and descriptive level metrics including v2 endpoints."""
+    scale = node_scale(arms.y)
+    metric_rows, level_rows = [], []
+    principal_arms = {
+        (*arm, RAW_LR if arm[1] == "raw" else 0.1) for arm in ARM_CELLS.values()
+    }
+    for (reconciler, controller, lr), (lo, hi) in arms.intervals.items():
+        values = v2_node_metrics(arms.y, lo, hi, scale, alpha=alpha, window=window)
+        role = (
+            "principal"
+            if (reconciler, controller, lr) in principal_arms
+            else "descriptive"
+        )
+        for node_index, node in enumerate(arms.nodes):
+            metric_rows.append(
+                {
+                    "model": model,
+                    "node": node,
+                    "role": role,
+                    "reconciler": reconciler,
+                    "controller": controller,
+                    "lr": lr,
+                    **{
+                        name: float(value[node_index]) for name, value in values.items()
+                    },
+                }
+            )
+        for level, indices in (
+            ("leaf_mean", arms.endpoint),
+            ("us", np.arange(len(arms.nodes)) == 0),
+        ):
+            level_rows.append(
+                {
+                    "model": model,
+                    "level": level,
+                    "role": role,
+                    "reconciler": reconciler,
+                    "controller": controller,
+                    "lr": lr,
+                    **{
+                        name: float(value[indices].mean())
+                        for name, value in values.items()
+                    },
+                }
+            )
+    return pd.DataFrame(metric_rows), pd.DataFrame(level_rows)
+
+
+def _run_benchmark_v2(
+    bundles: Mapping[str, HierarchyBundle], cfg: BenchmarkConfig, actuals: ActualPanel
+) -> BenchmarkResult:
+    """Run the registered twelve-cell v2 evaluation and paired inference."""
+    start = common_evaluation_index(bundles, cfg)
+    order = _required_models(cfg)
+    reference = bundles[cfg.reference_model]
+    if actuals.nodes != reference.nodes:
+        raise ValueError("canonical actual nodes do not match benchmark bundles")
+    pi_scales = _fixed_common_pi_scales(actuals, reference.forecast_dates[start])
+    root = np.random.SeedSequence(cfg.panel.root_seed, spawn_key=cfg.seed_spawn_key)
+    seeds = root.spawn(len(cfg.panel.blocks) + 1)
+    draws = {
+        block: draw_blocks(
+            len(reference.dates) - start,
+            block,
+            cfg.panel.n_boot,
+            np.random.default_rng(seed),
+        )
+        for block, seed in zip(cfg.panel.blocks, seeds[:-1], strict=True)
+    }
+    evidence = {model: {} for model in order}
+    arms = {
+        model: forecaster_arms(
+            bundles[model],
+            cfg.panel,
+            evaluation_index=start,
+            fixed_pi_scales=pi_scales,
+            reconciliation_evidence=evidence[model],
+        )
+        for model in order
+    }
+    intervals, metrics, levels, forecasts = [], [], [], []
+    for model in order:
+        model_arms = arms[model]
+        frame = intervals_frame(model, model_arms).rename(
+            columns={"forecaster": "model"}
+        )
+        intervals.append(frame)
+        metric_frame, level_frame = _v2_metric_frames(
+            model,
+            model_arms,
+            alpha=cfg.panel.controller.alpha,
+            window=cfg.panel.rolling_window,
+        )
+        metrics.append(metric_frame)
+        levels.append(level_frame)
+        base = _base_forecasts(model, bundles[model])
+        base["source_kind"] = (
+            "submitted_quantiles"
+            if model == cfg.reference_model
+            else "native_quantiles"
+            if model == "qr_l1"
+            else "sample_derived"
+        )
+        forecasts.append(base)
+    intervention, reference_contrasts = v2_contrast_tables(
+        arms, draws, alpha=cfg.panel.controller.alpha, window=cfg.panel.rolling_window
+    )
+    stage_tables = [
+        reconciliation_tables(model, bundles[model], evidence[model]) for model in order
+    ]
+    result = BenchmarkResult(
+        base_forecasts=pd.concat(forecasts, ignore_index=True),
+        intervals=pd.concat(intervals, ignore_index=True),
+        metrics=pd.concat(metrics, ignore_index=True),
+        level_metrics=pd.concat(levels, ignore_index=True),
+        hierarchy_contrasts=intervention,
+        model_contrasts=reference_contrasts,
+        diagnostics={
+            "protocol_version": 2,
+            "evaluation_start": str(pd.Timestamp(reference.dates[start]).date()),
+            "evaluation_end": str(pd.Timestamp(reference.dates[-1]).date()),
+            "n_weeks": len(reference.dates) - start,
+            "nodes": list(reference.nodes),
+            "n_endpoint": int(arms[cfg.reference_model].endpoint.sum()),
+            "model_order": list(order),
+            "pi_scales": dict(zip(reference.nodes, pi_scales.tolist(), strict=True)),
+            "models": {model: arms[model].diagnostics for model in order},
+        },
+        tables=DiagnosticsTables(
+            **{
+                name: pd.concat(
+                    [getattr(tables, name) for tables in stage_tables],
+                    ignore_index=True,
+                )
+                for name in (
+                    "forecast_diagnostics",
+                    "tuning",
+                    "quantile_repairs",
+                    "warnings",
+                )
+            }
+        ),
+    )
+    validate_finite_benchmark(result)
+    return result
+
+
+def validate_finite_benchmark(result: BenchmarkResult) -> None:
+    """Reject nonfinite numeric metrics and inferential summaries with cell context.
+
+    Args:
+        result: Evaluated tables, including descriptive cells.
+
+    Raises:
+        ValueError: On the first nonfinite scored or inferential cell.
+    """
+    for table in ("metrics", "level_metrics", "hierarchy_contrasts", "model_contrasts"):
+        frame = getattr(result, table)
+        for column in frame.select_dtypes(include="number"):
+            invalid = ~np.isfinite(frame[column].to_numpy(dtype=float))
+            if invalid.any():
+                row = frame.iloc[np.flatnonzero(invalid)[0]]
+                context = " ".join(
+                    f"{key}={row[key]}"
+                    for key in (
+                        "model",
+                        "reconciler",
+                        "controller",
+                        "node",
+                        "level",
+                        "arm",
+                        "contrast",
+                        "block",
+                    )
+                    if key in row.index
+                )
+                raise ValueError(
+                    f"nonfinite {table}: {context} metric={column} value={row[column]}"
+                )

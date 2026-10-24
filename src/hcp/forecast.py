@@ -2,6 +2,7 @@
 # ABOUTME: Prepares prefix-only histories, assigns deterministic seeds, and returns immutable bundles without I/O.
 """Causal benchmark forecast orchestration."""
 
+import json
 import time
 import warnings
 from collections import Counter
@@ -11,8 +12,21 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
+from hcp.benchmark_batch import NeuralExecution, OriginForecastBatch
 from hcp.benchmark_data import ActualPanel
-from hcp.data import HierarchyBundle
+from hcp.forecast_assembly import (
+    _assemble_model_bundles,
+    _seed_key,
+    _source_kind,
+    _tables,
+)
+from hcp.forecast_classical import (
+    arima_prediction,
+    prophet_prediction,
+    sarima_prediction,
+)
+from hcp.forecast_deepar import enhanced_deepar_prediction
+from hcp.forecast_diagnostics import _json_diagnostic, adapter_diagnostic_rows
 from hcp.forecast_models import (
     ForecastSettings,
     PreparedHistory,
@@ -20,15 +34,72 @@ from hcp.forecast_models import (
     deepar_samples,
     sarima_samples,
 )
+from hcp.forecast_neural import transformer_prediction
+from hcp.forecast_preparation import (
+    _prepare_origin,
+    _validate_inputs,
+)
+from hcp.forecast_quantile import qr_prediction
+from hcp.forecast_types import (
+    ForecastPlan,
+    ForecastResult,
+    NativePrediction,
+    V2ModelSettings,
+    prediction_quantiles,
+)
 
 ForecastAdapter = Callable[
-    [tuple[PreparedHistory, ...], ForecastSettings, np.random.SeedSequence],
-    np.ndarray,
+    [
+        tuple[PreparedHistory, ...],
+        ForecastSettings,
+        np.random.SeedSequence,
+        NeuralExecution,
+    ],
+    np.ndarray | NativePrediction,
 ]
+
+
+def _arima_adapter(histories, settings, seed, execution):
+    return (
+        arima_prediction(histories, settings, seed)
+        if isinstance(settings, V2ModelSettings)
+        else arima_samples(histories, settings, seed)
+    )
+
+
+def _sarima_adapter(histories, settings, seed, execution):
+    return (
+        sarima_prediction(histories, settings, seed)
+        if isinstance(settings, V2ModelSettings)
+        else sarima_samples(histories, settings, seed)
+    )
+
+
+def _deepar_adapter(histories, settings, seed, execution):
+    samples = deepar_samples(histories, settings, seed, execution)
+    if isinstance(settings, V2ModelSettings):
+        return NativePrediction(
+            tuple(h.node for h in histories), settings.ahead, "samples", samples=samples
+        )
+    return samples
+
+
+def _prophet_adapter(histories, settings, seed, execution):
+    return prophet_prediction(histories, settings, seed)
+
+
+def _qr_adapter(histories, settings, seed, execution):
+    return qr_prediction(histories, settings, seed)
+
+
 FORECASTERS: dict[str, ForecastAdapter] = {
-    "arima": arima_samples,
-    "sarima": sarima_samples,
-    "deepar": deepar_samples,
+    "arima": _arima_adapter,
+    "sarima": _sarima_adapter,
+    "deepar": _deepar_adapter,
+    "prophet": _prophet_adapter,
+    "transformer": transformer_prediction,
+    "qr_l1": _qr_adapter,
+    "deepar_enhanced": enhanced_deepar_prediction,
 }
 
 
@@ -42,7 +113,12 @@ class ForecastConfig:
     refit_every: int = 1
     root_seed: int = 0
     seed_spawn_key: tuple[int, ...] = (0,)
-    settings: ForecastSettings = field(default_factory=ForecastSettings)
+    settings: ForecastSettings | V2ModelSettings = field(
+        default_factory=ForecastSettings
+    )
+    execution: NeuralExecution = field(default_factory=NeuralExecution.cpu)
+    protocol_version: int = 1
+    v2_settings: V2ModelSettings | None = None
 
     def __post_init__(self) -> None:
         if not self.models or len(set(self.models)) != len(self.models):
@@ -66,143 +142,51 @@ class ForecastConfig:
             raise ValueError("n_samples must be positive")
         if self.root_seed < 0 or any(value < 0 for value in self.seed_spawn_key):
             raise ValueError("seed values must be non-negative")
-
-
-@dataclass(frozen=True)
-class ForecastResult:
-    """Generated hierarchy bundles, long forecasts, and fit diagnostics."""
-
-    bundles: dict[str, HierarchyBundle]
-    base_forecasts: pd.DataFrame
-    diagnostics: dict
-
-
-def _weekly(name: str, values: np.ndarray) -> np.ndarray:
-    array = np.asarray(values, dtype="datetime64[ns]")
-    if array.ndim != 1 or len(array) == 0:
-        raise ValueError(f"{name} must be a non-empty one-dimensional date grid")
-    if len(array) > 1 and not np.all(np.diff(array) == np.timedelta64(7, "D")):
-        raise ValueError(f"{name} must be a strict weekly grid")
-    return array
-
-
-def _validate_inputs(
-    actuals: ActualPanel, dates: np.ndarray, forecast_dates: np.ndarray
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    actual_dates = _weekly("canonical actual dates", actuals.dates)
-    targets = _weekly("target dates", dates)
-    origins = _weekly("forecast dates", forecast_dates)
-    if origins.shape != targets.shape:
-        raise ValueError("forecast-date and target-date grids must have the same shape")
-    if np.any(targets - origins != np.timedelta64(26, "D")):
-        raise ValueError("benchmark forecasts require the registered 26-day lag")
-    expected = (len(actuals.nodes), len(actual_dates))
-    if actuals.y.shape != expected or actuals.observed.shape != expected:
-        raise ValueError(f"canonical node/date shape must be {expected}")
-    target_index = pd.Index(actual_dates).get_indexer(pd.Index(targets))
-    if np.any(target_index < 0):
-        raise ValueError("target date is unavailable in canonical actuals")
-    return targets, origins, target_index
-
-
-def _prepare_origin(
-    actuals: ActualPanel,
-    forecast_date: np.datetime64,
-    min_train_weeks: int,
-) -> tuple[tuple[PreparedHistory, ...], list[dict]] | None:
-    prefix = actuals.dates <= forecast_date
-    histories = []
-    records = []
-    for row, node in enumerate(actuals.nodes):
-        dates = np.asarray(actuals.dates[prefix], dtype="datetime64[ns]")
-        values = np.asarray(actuals.y[row, prefix], dtype=float)
-        finite = np.flatnonzero(np.isfinite(values))
-        if not len(finite):
-            return None
-        start = int(finite[0])
-        dates = dates[start:].copy()
-        values = values[start:].copy()
-        raw = int(np.isfinite(values).sum())
-        missing = ~np.isfinite(values)
-        filled = pd.Series(values).interpolate(limit_area="inside").to_numpy()
-        interpolated = int(np.sum(missing & np.isfinite(filled)))
-        if len(filled) < min_train_weeks or not np.isfinite(filled).all():
-            return None
-        dates.setflags(write=False)
-        filled.setflags(write=False)
-        histories.append(PreparedHistory(node=node, dates=dates, values=filled))
-        records.append(
-            {
-                "node": node,
-                "training_start": str(pd.Timestamp(dates[0]).date()),
-                "training_end": str(pd.Timestamp(dates[-1]).date()),
-                "raw_observations": raw,
-                "interpolated_observations": interpolated,
-            }
-        )
-    return tuple(histories), records
-
-
-def _bundle(
-    actuals: ActualPanel,
-    dates: np.ndarray,
-    forecast_dates: np.ndarray,
-    target_index: np.ndarray,
-    quantiles: np.ndarray,
-) -> HierarchyBundle:
-    arrays = {
-        "dates": dates.copy(),
-        "forecast_dates": forecast_dates.copy(),
-        "y": actuals.y[:, target_index].copy(),
-        "q": quantiles,
-        "imputed": np.zeros(quantiles.shape[:2], dtype=bool),
-    }
-    for array in arrays.values():
-        array.setflags(write=False)
-    return HierarchyBundle(nodes=actuals.nodes, **arrays)
-
-
-def _long_forecasts(model: str, bundle: HierarchyBundle) -> pd.DataFrame:
-    rows = []
-    for week, forecast_date, q_week in zip(
-        bundle.dates, bundle.forecast_dates, bundle.q.transpose(1, 0, 2), strict=True
-    ):
-        for node, values in zip(bundle.nodes, q_week, strict=True):
-            rows.append(
-                {
-                    "model": model,
-                    "node": node,
-                    "week": week,
-                    "forecast_date": forecast_date,
-                    "q_lo": values[0],
-                    "q_med": values[1],
-                    "q_hi": values[2],
-                }
+        if self.protocol_version not in (1, 2):
+            raise ValueError("protocol_version must be 1 or 2")
+        if (
+            self.protocol_version == 1
+            and self.models != ("arima", "sarima", "deepar")
+            and set(self.models)
+            & {"prophet", "transformer", "qr_l1", "deepar_enhanced"}
+        ):
+            raise ValueError("v2 models require protocol_version=2")
+        if self.protocol_version == 2:
+            expected = (
+                "arima",
+                "sarima",
+                "deepar",
+                "prophet",
+                "transformer",
+                "qr_l1",
+                "deepar_enhanced",
             )
-    return pd.DataFrame(rows)
+            if self.models != expected or self.v2_settings is None:
+                raise ValueError(
+                    "v2 requires its registered model order and model settings"
+                )
+            if self.settings is not self.v2_settings:
+                raise ValueError(
+                    "v2 settings must be shared by settings and v2_settings"
+                )
 
 
-def generate_model_bundles(
+def plan_model_forecasts(
     actuals: ActualPanel,
     dates: np.ndarray,
     forecast_dates: np.ndarray,
     cfg: ForecastConfig,
-) -> ForecastResult:
-    """Generate every configured model on one causal weekly target grid.
+) -> ForecastPlan:
+    """Validate a weekly grid and prepare causal histories without fitting.
 
     Args:
-        actuals: Canonical truth used to prepare expanding histories.
+        actuals: Canonical truth used for expanding histories.
         dates: Weekly target dates.
-        forecast_dates: Information cutoff paired with each target date.
-        cfg: Validated model and seed settings.
+        forecast_dates: Information cutoffs for those targets.
+        cfg: Registered forecast settings and deterministic seed addresses.
 
     Returns:
-        Immutable model bundles plus long forecasts and fit diagnostics.
-
-    Raises:
-        ValueError: On invalid grids, unavailable targets, invalid samples, or no
-            origin with sufficient history for every node.
-        RuntimeError: If a configured adapter fails to fit or predict.
+        An owned plan whose eligible keys follow model-major/origin-minor order.
     """
     targets, origins, target_index = _validate_inputs(actuals, dates, forecast_dates)
     prepared = [
@@ -216,71 +200,203 @@ def generate_model_bundles(
     if not any(item is not None for item in prepared):
         raise ValueError("no eligible origin has sufficient history for every node")
 
-    root = np.random.SeedSequence(cfg.root_seed, spawn_key=cfg.seed_spawn_key)
-    bundles: dict[str, HierarchyBundle] = {}
-    frames = []
-    model_diagnostics = {}
-    for model_name, model_seed in zip(
-        cfg.models, root.spawn(len(cfg.models)), strict=True
+    arrays = [
+        np.array(array, copy=True)
+        for array in (actuals.dates, actuals.y, actuals.observed)
+    ]
+    for array in arrays:
+        array.setflags(write=False)
+    owned_actuals = ActualPanel(arrays[0], tuple(actuals.nodes), arrays[1], arrays[2])
+    return ForecastPlan(
+        owned_actuals,
+        targets,
+        origins,
+        target_index,
+        tuple(prepared),
+        tuple(
+            (model, index)
+            for model in cfg.models
+            for index, item in enumerate(prepared)
+            if item is not None
+        ),
+        cfg,
+    )
+
+
+def generate_origin_batch(
+    plan: ForecastPlan,
+    model: str,
+    target_index: int,
+    cfg: ForecastConfig,
+) -> OriginForecastBatch:
+    """Execute one eligible key using its fixed original seed address.
+
+    Args:
+        plan: Validated causal forecast plan.
+        model: Registered model key.
+        target_index: Original position in the target grid.
+        cfg: The configuration used to prepare the plan.
+
+    Returns:
+        Owned native-unit quantiles and normalized diagnostics for one origin.
+    """
+    if cfg != plan.config:
+        raise ValueError("configuration differs from forecast plan")
+    if (
+        isinstance(target_index, bool)
+        or (model, target_index) not in plan.eligible_keys
     ):
-        adapter = FORECASTERS[model_name]
-        q = np.full((len(actuals.nodes), len(targets), 3), np.nan)
-        warning_counts: Counter[str] = Counter()
-        interpolation = []
-        fit_count = 0
-        started = time.perf_counter()
-        origin_seeds = model_seed.spawn(len(targets))
-        for index, (item, origin_seed) in enumerate(
-            zip(prepared, origin_seeds, strict=True)
+        raise ValueError("unknown or ineligible model/origin key")
+    model_name = model
+    item = plan.prepared[target_index]
+    adapter = FORECASTERS[model_name]
+    origin_seed = np.random.SeedSequence(
+        cfg.root_seed, spawn_key=_seed_key(plan, model, target_index)
+    )
+    diagnostic_rows = {
+        name: []
+        for name in ("forecast_diagnostics", "tuning", "quantile_repairs", "warnings")
+    }
+    warning_counts: Counter[str] = Counter()
+    q = np.full((len(plan.actuals.nodes), 3), np.nan)
+    started = time.perf_counter()
+    histories, records = item
+    try:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            output = adapter(histories, cfg.settings, origin_seed, cfg.execution)
+    except Exception as exc:
+        raise RuntimeError(
+            f"model {model_name!r} failed at origin "
+            f"{pd.Timestamp(plan.origins[target_index]).date()}: {exc}"
+        ) from exc
+    warning_counts.update(warning.category.__name__ for warning in caught)
+    origin = pd.Timestamp(plan.origins[target_index])
+    for warning in caught:
+        diagnostic_rows["warnings"].append(
+            {
+                "category": warning.category.__name__,
+                "message": str(warning.message),
+                "source": f"{warning.filename}:{warning.lineno}",
+                "model": model_name,
+                "node": None,
+                "origin": origin,
+                "candidate": None,
+                "phase": "outer_fit",
+                "count": 1,
+            }
+        )
+    if isinstance(output, NativePrediction):
+        if (
+            output.nodes != tuple(history.node for history in histories)
+            or output.ahead != cfg.settings.ahead
         ):
-            if item is None:
-                continue
-            histories, records = item
-            try:
-                with warnings.catch_warnings(record=True) as caught:
-                    warnings.simplefilter("always")
-                    samples = np.asarray(adapter(histories, cfg.settings, origin_seed))
-            except Exception as exc:
-                raise RuntimeError(
-                    f"model {model_name!r} failed at origin "
-                    f"{pd.Timestamp(origins[index]).date()}: {exc}"
-                ) from exc
-            warning_counts.update(warning.category.__name__ for warning in caught)
-            expected = (len(actuals.nodes), cfg.settings.ahead, cfg.settings.n_samples)
-            if samples.shape != expected:
-                raise ValueError(
-                    f"model {model_name!r} returned shape {samples.shape}, expected {expected}"
-                )
-            if not np.isfinite(samples).all():
-                raise ValueError(f"model {model_name!r} returned non-finite samples")
-            q[:, index, :] = np.quantile(
+            raise ValueError(
+                "native prediction nodes or horizon differ from prepared histories"
+            )
+        samples = output.samples
+        q = prediction_quantiles(output)
+        if output.diagnostics:
+            warning_counts.update(output.diagnostics.get("warning_counts", {}))
+        for key, rows in adapter_diagnostic_rows(
+            output.diagnostics or {}, model_name, origin
+        ).items():
+            diagnostic_rows[key].extend(rows)
+    else:
+        samples = np.asarray(output)
+    if samples is not None:
+        expected = (
+            len(plan.actuals.nodes),
+            cfg.settings.ahead,
+            cfg.settings.n_samples,
+        )
+        if samples.shape != expected:
+            raise ValueError(
+                f"model {model_name!r} returned shape {samples.shape}, expected {expected}"
+            )
+        if not np.isfinite(samples).all():
+            raise ValueError(f"model {model_name!r} returned non-finite samples")
+        if not isinstance(output, NativePrediction):
+            q = np.quantile(
                 samples[:, cfg.settings.ahead - 1, :], cfg.quantiles, axis=-1
             ).T
-            if np.any(np.diff(q[:, index, :], axis=-1) < 0):
-                raise ValueError(f"model {model_name!r} returned crossed quantiles")
-            interpolation.extend(
-                {"origin": str(pd.Timestamp(origins[index]).date()), **record}
-                for record in records
-            )
-            fit_count += 1
-        bundle = _bundle(actuals, targets, origins, target_index, q)
-        bundles[model_name] = bundle
-        frames.append(_long_forecasts(model_name, bundle))
-        model_diagnostics[model_name] = {
-            "fit_count": fit_count,
-            "warning_counts": dict(sorted(warning_counts.items())),
-            "elapsed_seconds": time.perf_counter() - started,
-            "interpolation": interpolation,
-        }
-    return ForecastResult(
-        bundles=bundles,
-        base_forecasts=pd.concat(frames, ignore_index=True),
-        diagnostics={
-            "models": model_diagnostics,
-            "seed": {
-                "root_seed": cfg.root_seed,
-                "spawn_key": list(cfg.seed_spawn_key),
-                "model_order": list(cfg.models),
-            },
-        },
+    if np.any(np.diff(q, axis=-1) < 0):
+        raise ValueError(f"model {model_name!r} returned crossed quantiles")
+    if cfg.protocol_version == 2:
+        diagnostic_rows["forecast_diagnostics"].append(
+            {
+                "model": model_name,
+                "node": None,
+                "forecast_date": origin,
+                "origin": origin,
+                "phase": "outer_fit",
+                "name": "origin_seed",
+                "value": json.dumps(
+                    _json_diagnostic(origin_seed.state), sort_keys=True, allow_nan=False
+                ),
+            }
+        )
+    interpolation = tuple(
+        {"origin": str(pd.Timestamp(plan.origins[target_index]).date()), **record}
+        for record in records
     )
+    return OriginForecastBatch(
+        model,
+        target_index,
+        plan.targets[target_index],
+        plan.origins[target_index],
+        origin_seed.spawn_key,
+        plan.actuals.nodes,
+        q,
+        _source_kind(model, cfg),
+        _tables(diagnostic_rows),
+        dict(sorted(warning_counts.items())),
+        interpolation,
+        time.perf_counter() - started,
+    )
+
+
+def assemble_model_bundles(
+    plan: ForecastPlan,
+    batches: tuple[OriginForecastBatch, ...],
+    cfg: ForecastConfig,
+) -> ForecastResult:
+    """Assemble complete origin batches into registered model and target order.
+
+    Args:
+        plan: Validated causal forecast plan.
+        batches: Every eligible batch exactly once, in any order.
+        cfg: The configuration used to prepare the plan.
+
+    Returns:
+        Hierarchy bundles, long forecasts, summaries and diagnostic tables.
+
+    Raises:
+        ValueError: If a batch is missing, duplicated, or differs from the plan.
+    """
+    return _assemble_model_bundles(plan, batches, cfg)
+
+
+def generate_model_bundles(
+    actuals: ActualPanel,
+    dates: np.ndarray,
+    forecast_dates: np.ndarray,
+    cfg: ForecastConfig,
+) -> ForecastResult:
+    """Generate all configured forecasts through the pure origin batch API.
+
+    Args:
+        actuals: Canonical truth used to prepare expanding histories.
+        dates: Weekly target dates.
+        forecast_dates: Information cutoff paired with each target date.
+        cfg: Validated model and seed settings.
+
+    Returns:
+        Immutable model bundles plus long forecasts and fit diagnostics.
+    """
+    plan = plan_model_forecasts(actuals, dates, forecast_dates, cfg)
+    batches = tuple(
+        generate_origin_batch(plan, model, index, cfg)
+        for model, index in plan.eligible_keys
+    )
+    return assemble_model_bundles(plan, batches, cfg)

@@ -39,7 +39,7 @@ def _grid(panel: ActualPanel, start: int, stop: int) -> tuple[np.ndarray, np.nda
     return dates, dates - np.timedelta64(26, "D")
 
 
-def _literal_adapter(histories, settings, seed):
+def _literal_adapter(histories, settings, seed, execution):
     samples = np.empty((len(histories), settings.ahead, settings.n_samples))
     for node, history in enumerate(histories):
         for horizon in range(settings.ahead):
@@ -56,9 +56,9 @@ def test_generation_is_causal_interpolates_prefix_and_uses_horizon_four(
     dates, forecast_dates = _grid(panel, 64, 65)
     seen = []
 
-    def recording_adapter(histories, settings, seed):
+    def recording_adapter(histories, settings, seed, execution):
         seen.append(histories)
-        return _literal_adapter(histories, settings, seed)
+        return _literal_adapter(histories, settings, seed, execution)
 
     monkeypatch.setitem(FORECASTERS, "literal", recording_adapter)
 
@@ -101,9 +101,9 @@ def test_configuration_order_controls_models_and_origin_seeds(monkeypatch) -> No
     calls = []
 
     def adapter(name):
-        def run(histories, settings, seed):
+        def run(histories, settings, seed, execution):
             calls.append((name, int(seed.generate_state(1)[0])))
-            return _literal_adapter(histories, settings, seed)
+            return _literal_adapter(histories, settings, seed, execution)
 
         return run
 
@@ -193,7 +193,9 @@ def test_invalid_adapter_shape_raises(monkeypatch) -> None:
     panel = _panel()
     dates, forecast_dates = _grid(panel, 64, 65)
     monkeypatch.setitem(
-        FORECASTERS, "literal", lambda histories, settings, seed: np.zeros((1, 4, 7))
+        FORECASTERS,
+        "literal",
+        lambda histories, settings, seed, execution: np.zeros((1, 4, 7)),
     )
     with pytest.raises(ValueError, match="shape"):
         generate_model_bundles(panel, dates, forecast_dates, _config())
@@ -214,7 +216,7 @@ def test_nonfinite_or_failed_adapter_aborts_generation(
     panel = _panel()
     dates, forecast_dates = _grid(panel, 64, 65)
 
-    def bad_adapter(histories, settings, seed):
+    def bad_adapter(histories, settings, seed, execution):
         if failure == "exception":
             raise RuntimeError("fit failed")
         return np.full((len(histories), settings.ahead, settings.n_samples), np.nan)
@@ -249,3 +251,183 @@ def test_outputs_are_read_only_with_exact_long_columns(monkeypatch) -> None:
         "q_med",
         "q_hi",
     ]
+
+
+def test_legacy_results_gain_independent_schema_bearing_diagnostic_tables() -> None:
+    from hcp.forecast import ForecastResult
+    from hcp.forecast_types import DiagnosticsTables
+
+    diagnostics = {"legacy": "preserved"}
+    first = ForecastResult(
+        bundles={}, base_forecasts=pd.DataFrame(), diagnostics=diagnostics
+    )
+    second = ForecastResult(bundles={}, base_forecasts=pd.DataFrame(), diagnostics={})
+    assert first.diagnostics is diagnostics
+    assert isinstance(first.tables, DiagnosticsTables)
+    for name in ("forecast_diagnostics", "tuning", "quantile_repairs", "warnings"):
+        table = getattr(first.tables, name)
+        assert table.empty
+        assert len(table.columns) >= 3
+        table.loc[0, table.columns[0]] = "arima"
+        assert getattr(second.tables, name).empty
+    source = pd.DataFrame(
+        {"model": ["qr_l1"], "node": ["us"], "forecast_date": ["2020-01-04"]}
+    )
+    tables = DiagnosticsTables(tuning=source)
+    source.loc[0, "model"] = "changed"
+    assert tables.tuning.loc[0, "model"] == "qr_l1"
+
+
+def test_ineligible_origins_reserve_seed_slots(monkeypatch) -> None:
+    from hcp.forecast_validation import neural_seed_streams
+
+    panel = _panel()
+    dates, forecast_dates = _grid(panel, 62, 66)
+
+    def adapter(histories, settings, seed, execution):
+        streams = neural_seed_streams(seed, 1)
+        value = np.random.default_rng(streams["prediction"][0]).normal()
+        return np.full((len(histories), settings.ahead, settings.n_samples), value)
+
+    monkeypatch.setitem(FORECASTERS, "literal", adapter)
+    original = generate_model_bundles(panel, dates, forecast_dates, _config())
+    raw = panel.y.copy()
+    raw[:, 0] = np.nan  # Origin 63 becomes ineligible; origin 64 retains its stream.
+    raw[:, 63:] += 100000  # Future values are invisible to all these fits.
+    changed = replace(panel, y=raw, observed=np.isfinite(raw))
+    rerun = generate_model_bundles(changed, dates, forecast_dates, _config())
+    assert np.isnan(original.bundles["literal"].q[:, 0]).all()
+    assert np.isfinite(original.bundles["literal"].q[:, 1]).all()
+    assert np.isnan(rerun.bundles["literal"].q[:, :2]).all()
+    np.testing.assert_array_equal(
+        original.bundles["literal"].q[:, 2:], rerun.bundles["literal"].q[:, 2:]
+    )
+
+
+def test_outer_history_preserves_raw_metadata_before_interpolation(monkeypatch) -> None:
+    panel = _panel(gaps=True)
+    dates, forecast_dates = _grid(panel, 64, 65)
+
+    def adapter(histories, settings, seed, execution):
+        history = histories[1]
+        assert history.raw_values is not None
+        assert np.isnan(history.raw_values[9])
+        assert history.values[9] == 20.0
+        assert not history.observed[9]
+        np.testing.assert_array_equal(
+            history.forecast_dates, history.dates - np.timedelta64(26, "D")
+        )
+        return _literal_adapter(histories, settings, seed, execution)
+
+    monkeypatch.setitem(FORECASTERS, "literal", adapter)
+    generate_model_bundles(panel, dates, forecast_dates, _config())
+
+
+def test_split_plan_reserves_seeds_and_assembles_registered_order(monkeypatch):
+    from hcp import forecast
+
+    panel = _panel(gaps=True)
+    dates, origins = _grid(panel, 62, 66)
+    calls = []
+
+    def adapter(histories, settings, seed, execution):
+        calls.append((seed.spawn_key, execution))
+        value = float(seed.generate_state(1)[0])
+        return np.full((len(histories), 4, settings.n_samples), value)
+
+    monkeypatch.setitem(FORECASTERS, "alpha", adapter)
+    monkeypatch.setitem(FORECASTERS, "beta", adapter)
+    cfg = _config("beta", "alpha")
+    plan = forecast.plan_model_forecasts(panel, dates, origins, cfg)
+    assert plan.eligible_keys == (("beta", 2), ("beta", 3), ("alpha", 2), ("alpha", 3))
+    assert calls == []
+    batches = tuple(
+        forecast.generate_origin_batch(plan, *key, cfg) for key in plan.eligible_keys
+    )
+    assert calls == [
+        (cfg.seed_spawn_key + (m, i), cfg.execution) for m in range(2) for i in (2, 3)
+    ]
+    # A completed earlier origin and another model cannot advance this address.
+    later = forecast.generate_origin_batch(plan, "beta", 3, cfg)
+    np.testing.assert_array_equal(later.quantiles, batches[1].quantiles)
+    assert later.seed_spawn_key == cfg.seed_spawn_key + (0, 3)
+    split = forecast.assemble_model_bundles(plan, tuple(reversed(batches)), cfg)
+    wrapped = forecast.generate_model_bundles(panel, dates, origins, cfg)
+    assert tuple(split.bundles) == cfg.models
+    pd.testing.assert_frame_equal(split.base_forecasts, wrapped.base_forecasts)
+    for name in cfg.models:
+        np.testing.assert_array_equal(split.bundles[name].q, wrapped.bundles[name].q)
+        assert np.isnan(split.bundles[name].q[:, :2]).all()
+        summary = split.diagnostics["models"][name]
+        expected = wrapped.diagnostics["models"][name]
+        assert {k: v for k, v in summary.items() if k != "elapsed_seconds"} == {
+            k: v for k, v in expected.items() if k != "elapsed_seconds"
+        }
+        assert summary["elapsed_seconds"] == sum(
+            b.elapsed_seconds for b in batches if b.model == name
+        )
+    for name in ("forecast_diagnostics", "tuning", "quantile_repairs", "warnings"):
+        pd.testing.assert_frame_equal(
+            getattr(split.tables, name), getattr(wrapped.tables, name)
+        )
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        "missing",
+        "duplicate",
+        "origin",
+        "target",
+        "nodes",
+        "seed",
+        "model",
+        "index",
+        "nan",
+        "crossed",
+        "source",
+    ],
+)
+def test_split_assembly_rejects_invalid_batches(monkeypatch, corruption):
+    from hcp import forecast
+
+    panel = _panel()
+    dates, origins = _grid(panel, 64, 66)
+    monkeypatch.setitem(FORECASTERS, "literal", _literal_adapter)
+    cfg = _config()
+    plan = forecast.plan_model_forecasts(panel, dates, origins, cfg)
+    batches = tuple(
+        forecast.generate_origin_batch(plan, *key, cfg) for key in plan.eligible_keys
+    )
+    changes = {
+        "origin": {"origin": batches[0].origin + np.timedelta64(7, "D")},
+        "target": {"target": batches[0].target + np.timedelta64(7, "D")},
+        "nodes": {"nodes": tuple(reversed(panel.nodes))},
+        "seed": {"seed_spawn_key": (999,)},
+        "model": {"model": "wrong"},
+        "index": {"target_index": 99},
+        "nan": {"quantiles": np.full((2, 3), np.nan)},
+        "crossed": {"quantiles": np.tile([3.0, 2.0, 1.0], (2, 1))},
+        "source": {"source_kind": "native_quantiles"},
+    }
+    if corruption == "missing":
+        batches = batches[:1]
+    elif corruption == "duplicate":
+        batches += batches[:1]
+    else:
+        batches = (replace(batches[0], **changes[corruption]), batches[1])
+    with pytest.raises(ValueError):
+        forecast.assemble_model_bundles(plan, batches, cfg)
+
+
+def test_split_execution_rejects_ineligible_or_unknown_key(monkeypatch):
+    from hcp import forecast
+
+    panel = _panel()
+    dates, origins = _grid(panel, 62, 65)
+    monkeypatch.setitem(FORECASTERS, "literal", _literal_adapter)
+    cfg = _config()
+    plan = forecast.plan_model_forecasts(panel, dates, origins, cfg)
+    for key in (("literal", 0), ("literal", -1), ("literal", 99), ("missing", 2)):
+        with pytest.raises(ValueError):
+            forecast.generate_origin_batch(plan, *key, cfg)

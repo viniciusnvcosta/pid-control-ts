@@ -33,7 +33,12 @@ from hcp.panel_metrics import (
     node_metrics,
     node_scale,
 )
-from hcp.reconcile import available_errors, evaluation_start, reconcile_bundle
+from hcp.reconcile import (
+    Reconciled,
+    available_errors,
+    evaluation_start,
+    reconcile_bundle,
+)
 from hcp.report import RAW_LR
 from hcp.stats import draw_blocks, holm, summarize_diff
 
@@ -111,6 +116,8 @@ def forecaster_arms(
     cfg: PanelConfig,
     *,
     evaluation_index: int | None = None,
+    fixed_pi_scales: np.ndarray | None = None,
+    reconciliation_evidence: dict[str, Reconciled] | None = None,
 ) -> ForecasterArms:
     """Reconcile and conformalize every scored node on the forecaster's evaluation window.
 
@@ -134,12 +141,30 @@ def forecaster_arms(
     if not nodes or nodes[0] != ROOT:
         raise ValueError("the US root must be scored on the evaluation window")
     y = window_y[scored]
+    if fixed_pi_scales is not None:
+        fixed_pi_scales = np.asarray(fixed_pi_scales, dtype=float)
+        if (
+            fixed_pi_scales.shape != (len(bundle.nodes),)
+            or not np.isfinite(fixed_pi_scales).all()
+            or (fixed_pi_scales <= 0).any()
+        ):
+            raise ValueError(
+                "fixed PI scales must be finite positive values for every node"
+            )
+        fixed_pi_scales = fixed_pi_scales[scored]
     endpoint = np.array(
         [i > 0 and name not in TERRITORIES for i, name in enumerate(nodes)]
     )
     q, intervals, crossings, root_crossings, shrinkage = {}, {}, {}, {}, {}
     for reconciler in cfg.reconcilers:
-        rec = reconcile_bundle(bundle, reconciler, cfg.mint_warmup)
+        rec = reconcile_bundle(
+            bundle,
+            reconciler,
+            cfg.mint_warmup,
+            collect_evidence=reconciliation_evidence is not None,
+        )
+        if reconciliation_evidence is not None:
+            reconciliation_evidence[reconciler] = rec
         crossings[reconciler] = rec.crossings
         root_crossings[reconciler] = rec.root_crossings
         if np.isfinite(rec.shrinkage[t0:]).all():
@@ -155,6 +180,11 @@ def forecaster_arms(
                         q[reconciler][i, :, 2],
                         controller,
                         settings,
+                        scale=(
+                            float(fixed_pi_scales[i])
+                            if controller == "pi_norm" and fixed_pi_scales is not None
+                            else None
+                        ),
                     )
                     for i in range(len(nodes))
                 ]

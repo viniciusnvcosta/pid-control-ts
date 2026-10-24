@@ -7,6 +7,7 @@ dependencies = [
     "matplotlib>=3.11.2",
     "numpy>=2.3.5",
     "pandas>=3.0.6",
+    "prophet>=1.5.0",
     "pyarrow>=25.0.1",
     "scikit-learn>=1.9.1",
     "scipy>=1.17.1",
@@ -39,6 +40,18 @@ markers = [
 
 [tool.ruff.lint]
 extend-select = ["PLC0415"]
+
+[tool.ruff]
+extend-exclude = [
+    "tests/base_plots.py",
+    "tests/base_test.py",
+    "tests/datasets.py",
+    "tests/datasets/covid-ts-proc/statewide/death-forecasting-perstate-lasso-qr.ipynb",
+    "tests/inset_plot.py",
+    "tests/plotting_utils.py",
+    "docs/superpowers/plans/2026-10-20-hierarchical-panel.md",
+    "docs/superpowers/plans/2026-10-22-probabilistic-model-benchmarks-v2.md",
+]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["PLC0415"]

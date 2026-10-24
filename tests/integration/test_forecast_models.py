@@ -6,7 +6,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from hcp import forecast_models
+from hcp import forecast_neural
+from hcp.benchmark_batch import NeuralExecution
 from hcp.forecast_models import (
     ForecastSettings,
     PreparedHistory,
@@ -78,8 +79,12 @@ def test_deepar_is_repeatable_preserves_order_and_restores_scale() -> None:
         values=small.values * 10.0,
     )
 
-    first = deepar_samples((large, small), settings, np.random.SeedSequence(321))
-    repeated = deepar_samples((large, small), settings, np.random.SeedSequence(321))
+    first = deepar_samples(
+        (large, small), settings, np.random.SeedSequence(321), NeuralExecution.cpu()
+    )
+    repeated = deepar_samples(
+        (large, small), settings, np.random.SeedSequence(321), NeuralExecution.cpu()
+    )
 
     assert first.shape == (2, 4, 7)
     assert np.isfinite(first).all()
@@ -92,21 +97,24 @@ def test_deepar_uses_cpu_deterministic_trainer_without_writes(
 ) -> None:
     settings = replace(ForecastSettings(), n_samples=7)
     constructor: dict[str, object] = {}
-    real_rnn_model = forecast_models.RNNModel
+    real_rnn_model = forecast_neural.RNNModel
 
     def recording_rnn_model(*args, **kwargs):
         constructor.update(kwargs)
         return real_rnn_model(*args, **kwargs)
 
-    monkeypatch.setattr(forecast_models, "RNNModel", recording_rnn_model)
+    monkeypatch.setattr(forecast_neural, "RNNModel", recording_rnn_model)
     monkeypatch.chdir(tmp_path)
 
-    result = deepar_samples((_history(),), settings, np.random.SeedSequence(7))
+    result = deepar_samples(
+        (_history(),), settings, np.random.SeedSequence(7), NeuralExecution.cpu()
+    )
 
     trainer = constructor["pl_trainer_kwargs"]
     assert trainer == {
         "accelerator": "cpu",
         "devices": 1,
+        "precision": "32-true",
         "deterministic": True,
         "logger": False,
         "enable_checkpointing": False,
@@ -117,3 +125,68 @@ def test_deepar_uses_cpu_deterministic_trainer_without_writes(
     assert constructor["log_tensorboard"] is False
     assert result.shape == (1, 4, 7)
     assert list(tmp_path.iterdir()) == []
+
+
+def test_real_cuda_deepar_repeatability_and_device(monkeypatch):
+    import torch
+
+    from hcp.forecast import FORECASTERS
+
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA unavailable")
+    execution = NeuralExecution(
+        "cuda:0", "NVIDIA GeForce RTX 4080", ":4096:8", False, "32-true"
+    )
+    torch.use_deterministic_algorithms(True, warn_only=False)
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+    devices = []
+    real = forecast_neural.RNNModel
+    from darts.models.forecasting.rnn_model import _RNNModule
+
+    forward = _RNNModule.forward
+
+    def record_forward(module, inputs, *args, **kwargs):
+        devices.append(str(inputs[0].device))
+        return forward(module, inputs, *args, **kwargs)
+
+    monkeypatch.setattr(_RNNModule, "forward", record_forward)
+
+    def construct(**kwargs):
+        trainer = kwargs["pl_trainer_kwargs"]
+        assert trainer["accelerator"] == "gpu"
+        assert trainer["devices"] == [0]
+        assert trainer["precision"] == "32-true"
+        assert trainer["deterministic"] is True
+        model = real(**kwargs)
+        fit = model.fit
+
+        def record(*args, **kw):
+            assert kw["dataloader_kwargs"] == {"num_workers": 0, "pin_memory": False}
+            return fit(*args, **kw)
+
+        model.fit = record
+        return model
+
+    monkeypatch.setattr(forecast_neural, "RNNModel", construct)
+    settings = replace(ForecastSettings(), n_samples=8, deepar_n_epochs=1)
+    import warnings
+    from collections import Counter
+
+    outputs, warning_counts, seeds = [], [], []
+    for _ in range(2):
+        seed = np.random.SeedSequence(89)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            outputs.append(
+                FORECASTERS["deepar"]((_history(),), settings, seed, execution)
+            )
+        warning_counts.append(Counter(w.category.__name__ for w in caught))
+        seeds.append(
+            (seed.spawn_key, seed.n_children_spawned, seed.generate_state(1).tolist())
+        )
+    assert warning_counts[0] == warning_counts[1]
+    assert seeds[0] == seeds[1]
+    assert seeds[0][:2] == ((), 0)
+    np.testing.assert_array_equal(*outputs)
+    assert devices and set(devices) == {"cuda:0"}
