@@ -1,10 +1,10 @@
 # Model benchmarks v2 protocol readiness
 
-**Status: registered and implementation gates passed; awaiting separate launch authorization.** This is a protocol and verification record, not an outcome report. No official v2 realization or scientific contrast has been generated or inspected.
+**Status: resumable CUDA scoped gates passed; whole-branch review and full verification remain launch gates.** This is a protocol and verification record, not an outcome report. No official v2 result has been published.
 
 ## Registered identity
 
-The immutable study and run identity is `model-benchmarks-v2`, configured by [`configs/model_benchmarks_v2.toml`](../../configs/model_benchmarks_v2.toml). The numerical protocol hash is SHA-256 over the exact bytes of that registered TOML: `c9978b8d990f699f7e5e96170a118e9abeacba941ee939a9876edd4679e0f8bf`. This is also the config SHA-256. The lockfile SHA-256 at registration is `551bf39a924beed6236e2e8a778f7124b2e9e63f6a60ad5c51d0a9ee25453355`; the input `data/deaths.csv` SHA-256 is `cb4dccfd21d6c08b1247aa9a7c6a8d93f7c373871526cfcb4860df884b54ac06`.
+The immutable study and run identity is `model-benchmarks-v2`, configured by [`configs/model_benchmarks_v2.toml`](../../configs/model_benchmarks_v2.toml). The numerical protocol hash is SHA-256 over the exact bytes of that registered TOML: `c9978b8d990f699f7e5e96170a118e9abeacba941ee939a9876edd4679e0f8bf`. This is the historical pre-amendment config SHA-256; the amended CUDA TOML SHA-256 is `18c326dfb661097c6aa701b6eda5f6f0ac149addbf4d87e32cd3862c95997602`. The lockfile SHA-256 at registration is `551bf39a924beed6236e2e8a778f7124b2e9e63f6a60ad5c51d0a9ee25453355`; the input `data/deaths.csv` SHA-256 is `cb4dccfd21d6c08b1247aa9a7c6a8d93f7c373871526cfcb4860df884b54ac06`.
 
 The seven generated models are ARIMA, SARIMA, Darts DeepAR-style LSTM, Prophet, Darts Transformer, local native-L1 quantile regression, and enhanced DeepAR-style LSTM. The reference is `covidhub` / `COVIDhub-4_week_ensemble`. All 57 hierarchy nodes participate; the inferential leaf endpoint is the 51 states/DC. The design uses untransformed deaths, weekly expanding fits with at least 60 training weeks, four-step forecasts retaining step four, weekly refits, and one common evaluation window with at least 60 weeks.
 
@@ -26,10 +26,57 @@ Repository Ruff gates passed after the consolidated fix: `ruff check .` reported
 
 The reduced development integration checks adapter availability and interfaces, not forecast quality or the registered common-window result. Bootstrap intervals are pointwise and conditional on completed fitted pipelines. The study is exploratory, and D15's truth-vintage and PI look-ahead limitations remain. These do not change after protocol registration.
 
-Registration, review, tests, and lint checks do not authorize execution. `results/model-benchmarks-v2/` is absent. No official run, result, or in-memory reproduction was created or inspected. The prospective command is:
+## Prospective CUDA amendment and unpublished attempts
+
+The first pre-amendment full attempt completed most computation but refused publication because Git `HEAD` changed during execution. A second attempt was stopped before changing the execution design. Both attempts remain unpublished; neither produced `results/model-benchmarks-v2/`. This record makes no outcome interpretation.
+
+The prospective amendment design is `5a6b13b81ec450f3f5f4d97aa0866c18ec149d97`; registration/contracts are `e5a7d91fdb4b84d9f7ff4bda900032968e830450`. Task 9 verified implementation through atomic resumed publication at `2aea38b4cdb11afc92a222dab9107fafa34a5711`. These anchors are not a future launch SHA: launch must record the final reviewed clean `HEAD`, including documentation and review fixes.
+
+On 2026-10-24 the prescribed repeatability suite ran twice outside the sandbox on physical `cuda:0`: NVIDIA GeForce RTX 4080, UUID `GPU-f3dad84a-4909-bd89-f509-0c2f79debd6f`, 16376 MiB, driver `610.88`, Torch `2.14.1+cu130`, CUDA runtime `13.0`, cuDNN `92400`; CUDA available. Both invocations passed **15 tests**, with **77 reviewed dependency warnings** each, in **23.03 s** and **21.99 s**. CPU characterization cases coexist with actual CUDA cases. Warnings concern CPU fixtures, absent validation loaders, pytree deprecation, low worker count, nested tensors, and empty prediction loaders.
 
 ```bash
-uv run python -m hcp.run configs/model_benchmarks_v2.toml
+UV_CACHE_DIR=/tmp/model-benchmarks-v2-cuda UV_NO_SYNC=1 uv run pytest -o addopts='' tests/integration/test_forecast_models.py tests/integration/test_forecast_deepar_enhanced.py tests/integration/test_forecast_transformer_integration.py -q
 ```
 
-Run it only after separate explicit launch authorization. The runner publishes once to the registered identity and refuses to overwrite an existing result.
+Full Task 9 verification used the following commands. The exact initial `uv run pytest` command failed because the default uv cache is read-only; with a writable cache, build dependency resolution failed fetching `hatchling` from PyPI due to DNS. Therefore `--no-sync` reused the installed environment without changing dependencies.
+
+```bash
+UV_CACHE_DIR=/tmp/model-benchmarks-v2-cuda uv run --no-sync pytest -o addopts='' tests/unit tests/integration tests/e2e -q
+UV_CACHE_DIR=/tmp/model-benchmarks-v2-cuda uv run --no-sync ruff check .
+UV_CACHE_DIR=/tmp/model-benchmarks-v2-cuda uv run --no-sync ruff format --check .
+git diff --check
+```
+
+Outside the sandbox, the full suite reported **601 passed, 1 skipped, 78 warnings, 1 teardown error (50.68 s)**. The unit DeepAR warning fixture expects `Can't initialize NVML`, whereas the physical GPU supplies `GPU available but not used`; its exact warning-set assertion fails. Ruff lint passed. Format verification failed on existing `src/hcp/forecast_assembly.py:104` (one file would be reformatted; 113 already formatted). These unresolved checks prevent declaring full verification green. Task 9 changes documentation only and leaves fixes to the review wave.
+
+## Interactive launch, monitoring, and exact resume
+
+After whole-branch review, fresh full verification, and explicit launch authorization, use an interactive terminal with physical CUDA access. For a fresh execution both registered directories must be absent. Preserve any incompatible work directory outside the registered path; never edit identity or batches to force reuse.
+
+```bash
+cd /home/vinvs/projects/research/pid-control-ts/.worktrees/model-benchmarks-v2
+git status --short
+git rev-parse HEAD
+test ! -e results/model-benchmarks-v2
+test ! -e results/.model-benchmarks-v2.partial
+UV_CACHE_DIR=/tmp/model-benchmarks-v2-cuda UV_NO_SYNC=1 uv run python -m hcp.run configs/model_benchmarks_v2.toml
+```
+
+From a second terminal in the same worktree:
+
+```bash
+watch -n 5 cat results/.model-benchmarks-v2.partial/progress.json
+tail -f results/.model-benchmarks-v2.partial/runtime.jsonl
+```
+
+The fixed work directory contains immutable `run-state.json`, advisory `progress.json`, `runtime.jsonl`, and atomic `batches/<model>/<origin>.batch/` directories. Each batch contains `forecasts.parquet`, `forecast_diagnostics.parquet`, `tuning.parquet`, `quantile_repairs.parquet`, `warnings.parquet`, and `batch.json` with schema, identity, and payload hashes. Generation follows the deterministic model-major/origin-minor plan. Valid existing batches are skipped; absent batches are generated. Invalid completed batches fail closed; temporary writes are never accepted as completed batches.
+
+Resume uses the **same command**, without a resume flag, from the same worktree and exact clean Git SHA:
+
+```bash
+UV_CACHE_DIR=/tmp/model-benchmarks-v2-cuda UV_NO_SYNC=1 uv run python -m hcp.run configs/model_benchmarks_v2.toml
+```
+
+Resume requires absent final output and matching full execution identity: Git SHA, config/input/lock hashes, seed and origin plan, packages, device, GPU UUID, driver, runtime, and deterministic precision settings. The CUDA contract uses `cuda:0`, FP32 `32-true`, no TF32, and cuBLAS workspace `:4096:8`; no CPU fallback is accepted. A mismatch preserves evidence and stops. Keep `HEAD` fixed through publication and across resume: **do not commit, merge, rebase, pull, or checkout during execution**. Do not change dependencies, inputs, config, or device environment. Progress and ETA are advisory; validated batches govern recovery.
+
+Final publication atomically renames the hidden work directory to immutable `results/model-benchmarks-v2/` after revalidating evidence and Git identity. An existing result is never overwritten. Task 9 did not launch the official benchmark; both registered final and hidden directories were absent at verification.
