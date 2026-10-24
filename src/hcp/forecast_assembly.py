@@ -101,9 +101,7 @@ def _assemble_model_bundles(
             elapsed += batch.elapsed_seconds
             fit_count += 1
             for name, rows in diagnostic_rows.items():
-                rows.extend(
-                    getattr(batch.diagnostics, name).to_dict("records")
-                )
+                rows.extend(getattr(batch.diagnostics, name).to_dict("records"))
         bundle = _bundle(
             plan.actuals, plan.targets, plan.origins, plan.target_indices, q
         )
