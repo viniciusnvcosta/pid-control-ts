@@ -85,6 +85,16 @@ def test_v2_cli_writes_all_models_cells_tables_and_manifest(
             diagnostics={"seed": {"root_seed": cfg.root_seed, "spawn_key": [0]}},
         ),
     )
+    # This case isolates the existing final-writer boundary; resume is covered below.
+    monkeypatch.setattr(run_module, "plan_model_forecasts", lambda *args: object())
+    monkeypatch.setattr(run_module, "_v2_execution_identity", lambda *args: object())
+
+    def generated_v2(*args, **kwargs):
+        workdir = args[3]
+        workdir.mkdir(parents=True)
+        return run_module.generate_model_bundles(), object()
+
+    monkeypatch.setattr(run_module, "_generate_or_resume_v2", generated_v2)
     cells = [
         {
             "model": model,
@@ -274,3 +284,130 @@ def test_v2_cli_writes_all_models_cells_tables_and_manifest(
     assert pd.read_parquet(out / "warnings.parquet").empty
     assert pd.read_parquet(out / "quantile_repairs.parquet").shape[0] == 1
     assert "D15" in manifest["limitations"]
+
+
+def test_v2_evaluation_scopes_tqdm_and_preserves_failed_workdir(
+    tmp_path, monkeypatch, capsys
+):
+    import os
+
+    import pytest
+
+    from core import methods
+
+    evaluate = getattr(run_module, "_evaluate_v2", None)
+    assert evaluate is not None, "quiet evaluation boundary is absent"
+    original_tqdm = methods.tqdm
+    monkeypatch.setenv("TQDM_DISABLE", "previous")
+
+    def benchmark(*args, **kwargs):
+        assert os.environ["TQDM_DISABLE"] == "1"
+        list(methods.tqdm(range(3)))
+        raise RuntimeError("evaluation interrupted")
+
+    monkeypatch.setattr(run_module, "run_benchmark", benchmark)
+    with pytest.raises(RuntimeError, match="evaluation interrupted"):
+        evaluate({}, object(), actuals=object(), workdir=tmp_path)
+    assert os.environ["TQDM_DISABLE"] == "previous"
+    assert methods.tqdm is original_tqdm
+    events = run_module._read_runtime_events(tmp_path)
+    assert [event["event"] for event in events] == ["evaluation_start", "error"]
+    captured = capsys.readouterr()
+    assert "evaluation_start" in captured.out
+    assert "it/s" not in captured.err and "100%" not in captured.err
+
+
+def test_cli_resumes_after_two_batches_before_evaluating(tmp_path, monkeypatch, capsys):
+    from dataclasses import replace
+
+    import pytest
+
+    from hcp.benchmark_batch import DeviceProvenance
+    from hcp.benchmark_data import ActualPanel
+    from hcp.config import load_config
+    from hcp.forecast import FORECASTERS, ForecastConfig
+
+    cfg = replace(
+        load_config(Path("configs/model_benchmarks_v2.toml")),
+        output_dir=tmp_path / "results",
+    )
+    real_hash = run_module.file_sha256
+    monkeypatch.setattr(
+        run_module,
+        "file_sha256",
+        lambda path: (
+            cfg.expected_sha256 if Path(path) == cfg.data_path else real_hash(path)
+        ),
+    )
+    forecast_cfg = ForecastConfig(models=("deepar",), root_seed=cfg.root_seed)
+    dates = pd.date_range("2020-01-04", periods=70, freq="7D").to_numpy()
+    actuals = ActualPanel(dates, ("us", "aa"), np.ones((2, 70)), np.ones((2, 70), bool))
+    monkeypatch.setattr(run_module, "load_config", lambda path: cfg)
+    monkeypatch.setattr(run_module, "require_clean_git", lambda repo: "a" * 40)
+    monkeypatch.setattr(run_module, "read_forecasts", lambda path: pd.DataFrame())
+    monkeypatch.setattr(run_module, "canonical_actuals", lambda frame: actuals)
+    monkeypatch.setattr(
+        run_module,
+        "reference_bundle",
+        lambda *args: SimpleNamespace(
+            dates=dates[64:68], forecast_dates=dates[64:68] - np.timedelta64(26, "D")
+        ),
+    )
+    monkeypatch.setattr(
+        run_module, "benchmark_configs", lambda cfg: (forecast_cfg, object())
+    )
+    monkeypatch.setattr(
+        run_module,
+        "_configure_v2_cuda",
+        lambda execution: DeviceProvenance(
+            "cuda:0",
+            0,
+            "GPU-test",
+            "NVIDIA GeForce RTX 4080",
+            (8, 9),
+            "570",
+            "2.8",
+            "12.8",
+            True,
+            False,
+            False,
+            "highest",
+            ":4096:8",
+        ),
+    )
+    calls = []
+    interrupted = True
+
+    def adapter(histories, settings, seed, execution):
+        if interrupted and len(calls) == 2:
+            raise RuntimeError("interrupted")
+        calls.append(seed.spawn_key)
+        return np.random.default_rng(seed).normal(size=(2, 4, settings.n_samples))
+
+    monkeypatch.setitem(FORECASTERS, "deepar", adapter)
+    evaluated = []
+
+    def evaluate(bundles, cfg, *, actuals):
+        evaluated.append(bundles["deepar"].q.copy())
+        return object()
+
+    monkeypatch.setattr(run_module, "run_benchmark", evaluate)
+    # Task 8 owns final publication; this test ends at that interface.
+    monkeypatch.setattr(
+        run_module, "_write_benchmark_v2_artifacts", lambda *args: tmp_path / "final"
+    )
+    with pytest.raises(RuntimeError, match="interrupted"):
+        run_module.main(["configs/model_benchmarks_v2.toml"])
+    assert not evaluated
+    assert not (cfg.output_dir / cfg.run_id).exists()
+    workdir = cfg.output_dir / f".{cfg.run_id}.partial"
+    assert len(list(workdir.glob("batches/*/*.batch"))) == 2
+    interrupted = False
+    calls.clear()
+    assert run_module.main(["configs/model_benchmarks_v2.toml"]) == 0
+    assert calls == [(0, 0, 2), (0, 0, 3)]
+    assert len(evaluated) == 1
+    events = run_module._read_runtime_events(workdir)
+    assert [event["event"] for event in events].count("evaluation_start") == 1
+    assert [event["event"] for event in events].count("resume_skip") == 2
+    assert len(capsys.readouterr().out.splitlines()) == 11
