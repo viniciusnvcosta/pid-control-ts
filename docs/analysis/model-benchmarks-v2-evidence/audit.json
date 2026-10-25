@@ -1,0 +1,41 @@
+{
+  "v1_source": "/home/vinvs/projects/research/pid-control-ts/results/model-benchmarks-v1",
+  "v1_manifest_sha256": "82cbfb382d916199272f9fd1e01a9456b345e43d2af9b1e30e5668b1ded8fd89",
+  "v2_manifest_sha256": "d817b687974a4d0c8561d7d353517b06720fb8731dbcae1003725f596b9b02b6",
+  "v2_git_sha": "06eb8017e6f302825debecf0acbc65abc4b7960d",
+  "v2_artifacts_checked": 3630,
+  "row_counts": {
+    "base_forecasts": 62472,
+    "forecast_diagnostics": 10086,
+    "hierarchy_contrasts": 288,
+    "intervals": 344736,
+    "level_metrics": 192,
+    "metrics": 5472,
+    "model_contrasts": 168,
+    "quantile_repairs": 794,
+    "tuning": 19952,
+    "warnings": 2360
+  },
+  "empty_rows": 1542,
+  "empty_rows_by_controller": {
+    "pi": 1515,
+    "pi_norm": 27,
+    "raw": 0
+  },
+  "warning_occurrences": {
+    "arima": 79,
+    "deepar": 344,
+    "deepar_enhanced": 1032,
+    "sarima": 526,
+    "transformer": 28964
+  },
+  "v1_v2_max_abs_base_quantile_delta": {
+    "arima": 0.0,
+    "covidhub": 0.0,
+    "deepar": 2742.142120052744,
+    "sarima": 0.0
+  },
+  "independent_metric_recomputation": "passed, all nodes and cells",
+  "contrast_estimates_and_holm_recomputation": "passed, all blocks",
+  "bootstrap_resampling_rerun": false
+}
